@@ -1,0 +1,182 @@
+{
+  "schema": 1,
+  "mode": "trend",
+  "notes": [
+    "Trend mode reports changes but does not fail CI on coverage percentages.",
+    "After at least 10 stable main-branch runs, set reviewed floors and change mode to enforce.",
+    "Never update this baseline automatically in CI."
+  ],
+  "stabilization": {
+    "minimum_main_runs": 10,
+    "global_tolerance_percentage_points": 0.5,
+    "security_group_tolerance_percentage_points": 1
+  },
+  "baseline": {
+    "schema": 1,
+    "rust": {
+      "total": {
+        "lines": {
+          "total": 25057,
+          "covered": 18427,
+          "percent": 73.54
+        },
+        "functions": {
+          "total": 2084,
+          "covered": 1486,
+          "percent": 71.31
+        },
+        "regions": {
+          "total": 38046,
+          "covered": 27623,
+          "percent": 72.6
+        }
+      },
+      "groups": {
+        "auth": {
+          "lines": {
+            "total": 3905,
+            "covered": 3291,
+            "percent": 84.28
+          },
+          "functions": {
+            "total": 322,
+            "covered": 254,
+            "percent": 78.88
+          },
+          "regions": {
+            "total": 5981,
+            "covered": 5034,
+            "percent": 84.17
+          }
+        },
+        "filesystem": {
+          "lines": {
+            "total": 5855,
+            "covered": 4644,
+            "percent": 79.32
+          },
+          "functions": {
+            "total": 474,
+            "covered": 349,
+            "percent": 73.63
+          },
+          "regions": {
+            "total": 9207,
+            "covered": 7108,
+            "percent": 77.2
+          }
+        },
+        "write-preconditions": {
+          "lines": {
+            "total": 2138,
+            "covered": 1040,
+            "percent": 48.64
+          },
+          "functions": {
+            "total": 141,
+            "covered": 68,
+            "percent": 48.23
+          },
+          "regions": {
+            "total": 3142,
+            "covered": 1546,
+            "percent": 49.2
+          }
+        },
+        "webdav": {
+          "lines": {
+            "total": 1005,
+            "covered": 477,
+            "percent": 47.46
+          },
+          "functions": {
+            "total": 98,
+            "covered": 51,
+            "percent": 52.04
+          },
+          "regions": {
+            "total": 1528,
+            "covered": 712,
+            "percent": 46.6
+          }
+        },
+        "range": {
+          "lines": {
+            "total": 259,
+            "covered": 132,
+            "percent": 50.97
+          },
+          "functions": {
+            "total": 36,
+            "covered": 19,
+            "percent": 52.78
+          },
+          "regions": {
+            "total": 409,
+            "covered": 230,
+            "percent": 56.23
+          }
+        }
+      }
+    },
+    "frontend": {
+      "total": {
+        "lines": {
+          "total": 612,
+          "covered": 47,
+          "percent": 7.68
+        },
+        "functions": {
+          "total": 89,
+          "covered": 16,
+          "percent": 17.98
+        },
+        "branches": {
+          "total": 288,
+          "covered": 42,
+          "percent": 14.58
+        },
+        "statements": {
+          "total": 654,
+          "covered": 53,
+          "percent": 8.1
+        }
+      }
+    }
+  },
+  "targets": {
+    "rust": {
+      "total": {
+        "lines": 75,
+        "functions": 70,
+        "regions": 70
+      },
+      "groups": {
+        "auth": {
+          "lines": 85
+        },
+        "filesystem": {
+          "lines": 80
+        },
+        "write-preconditions": {
+          "lines": 85
+        },
+        "webdav": {
+          "lines": 85
+        },
+        "range": {
+          "lines": 90
+        }
+      }
+    },
+    "frontend": {
+      "total": {
+        "lines": 75,
+        "functions": 70,
+        "branches": 70,
+        "statements": 75
+      }
+    }
+  },
+  "floors": null
+}

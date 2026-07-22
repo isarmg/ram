@@ -1,0 +1,133 @@
+name: Dedicated performance baseline
+
+on:
+  schedule:
+    - cron: "41 3 * * 3"
+  workflow_dispatch:
+    inputs:
+      baseline-mode:
+        description: Candidate only, auto-enforce an approved baseline, or require one
+        required: true
+        default: auto
+        type: choice
+        options:
+          - auto
+          - candidate
+          - enforce
+
+permissions:
+  contents: read
+
+# 固定并发组让所有分支在唯一专用基准机上串行执行。不得取消正在采样的运行：
+# 不完整样本不能作为性能测量。
+# The constant group serializes every branch on the one dedicated benchmark
+# host. Do not cancel an in-flight sample: partial runs are not measurements.
+concurrency:
+  group: ram-dedicated-performance-runner
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  benchmark:
+    name: Full debug/release performance suite
+    # 没有专用 runner 的仓库不得无限堆积定时任务。手动触发属于显式操作，可以等待
+    # 暂时离线的 runner；定时运行则要求运维人员确认的仓库标志。
+    # A repository without the dedicated runner must not accumulate scheduled
+    # jobs forever. Manual dispatch is explicit and may wait for a temporarily
+    # offline runner; schedules require an operator-attested repository flag.
+    if: github.event_name == 'workflow_dispatch' || vars.RAM_BENCHMARK_ENABLED == 'true'
+    # 自定义标签代表运维人员确认该机器满足 benchmarks/README.md 中的硬件、
+    # CPU 亲和性、本地文件系统和隔离契约。
+    # The custom label is an operator assertion of the hardware, affinity,
+    # local-filesystem and isolation contract in benchmarks/README.md.
+    runs-on: [self-hosted, linux, x64, ram-benchmark]
+    timeout-minutes: 180
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      RAM_BENCH_RUNNER_ID: dedicated-linux-x86_64-v1
+      RAM_BENCH_SERVER_CPUS: 2-5
+      RAM_BENCH_CLIENT_CPUS: 6-7
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Verify the pre-provisioned dedicated runner
+        run: |
+          set -euo pipefail
+          rustc --version | grep -E '^rustc 1\.96\.0 '
+          cargo --version
+          python3 --version
+          curl --version | grep -q 'Features:.*HTTP2'
+          h2load --help | grep -q -- '--h1'
+          h2load --help | grep -q -- '--alpn-list'
+          h2load --help | grep -q -- '--max-concurrent-streams'
+          test "$(uname -m)" = x86_64
+          test "$(nproc)" -ge 8
+          for cpu in 2 3 4 5 6 7; do
+            test "$(cat "/sys/devices/system/cpu/cpu${cpu}/cpufreq/scaling_governor")" = performance
+          done
+
+      - name: Build locked debug and release binaries
+        run: |
+          set -euo pipefail
+          cargo build --locked
+          cargo build --release --locked
+
+      - name: Run the full isolated suite
+        env:
+          RESULT_DIR: ${{ runner.temp }}/ram-performance-results-${{ github.run_id }}-${{ github.run_attempt }}
+          WORK_DIR: ${{ runner.temp }}/ram-performance-work-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RESULT_DIR" "$WORK_DIR"
+          python3 benchmarks/run.py \
+            --preset full \
+            --strict-environment \
+            --runner-id "$RAM_BENCH_RUNNER_ID" \
+            --binary-contract "cargo build --locked; default features; Rust 1.96.0" \
+            --server-cpus "$RAM_BENCH_SERVER_CPUS" \
+            --client-cpus "$RAM_BENCH_CLIENT_CPUS" \
+            --work-dir "$WORK_DIR" \
+            --binary debug=target/debug/ram \
+            --binary release=target/release/ram \
+            --output "$RESULT_DIR/performance-result.json"
+          python3 benchmarks/compare.py candidate \
+            --result "$RESULT_DIR/performance-result.json" \
+            --thresholds benchmarks/thresholds.json \
+            --output "$RESULT_DIR/performance-baseline-candidate.json"
+
+      - name: Compare the approved baseline when enabled
+        env:
+          REQUESTED_MODE: ${{ github.event.inputs['baseline-mode'] }}
+          RESULT_DIR: ${{ runner.temp }}/ram-performance-results-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          mode=${REQUESTED_MODE:-auto}
+          baseline=benchmarks/baselines/dedicated-linux-x86_64-v1.json
+          if [[ "$mode" == candidate ]]; then
+            echo "Candidate mode selected; no performance gate was applied."
+          elif [[ -f "$baseline" ]]; then
+            python3 benchmarks/compare.py compare \
+              --result "$RESULT_DIR/performance-result.json" \
+              --baseline "$baseline" \
+              --thresholds benchmarks/thresholds.json \
+              --output "$RESULT_DIR/performance-comparison.json"
+          elif [[ "$mode" == enforce ]]; then
+            echo "Approved baseline is required but absent: $baseline" >&2
+            exit 1
+          else
+            echo "No approved baseline yet; publishing a non-enforcing candidate."
+          fi
+
+      - name: Upload result, candidate, and comparison evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: performance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ram-performance-results-${{ github.run_id }}-${{ github.run_attempt }}/*.json
+          if-no-files-found: error
+          retention-days: 30

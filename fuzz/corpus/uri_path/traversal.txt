@@ -1,0 +1,2 @@
+files
+/files/%2E%2E/secret

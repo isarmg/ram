@@ -1,0 +1,1 @@
+Username="a\\\"b", REALM="ram", qop=auth, nc=0000000f, cnonce="slash\\\\quote\\\""

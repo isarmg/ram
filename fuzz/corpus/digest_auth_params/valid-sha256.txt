@@ -1,0 +1,1 @@
+username="alice", realm="ram", nonce="00000000seed", uri="/files/report.txt", response="0123456789abcdef", algorithm=SHA-256, qop=auth, nc=00000001, cnonce="seed"

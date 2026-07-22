@@ -1,0 +1,339 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  quality:
+    name: Rust, frontend modules, and static web checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Lint workflows and standalone shell scripts
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/actionlint.tar.gz"
+          tool_dir="${RUNNER_TEMP}/actionlint"
+          curl \
+            --proto '=https' \
+            --tlsv1.2 \
+            --fail \
+            --location \
+            --silent \
+            --show-error \
+            --retry 3 \
+            --output "$archive" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          printf '%s  %s\n' "$ACTIONLINT_SHA256" "$archive" | sha256sum --check --strict -
+          mkdir -p "$tool_dir"
+          tar --extract --gzip --no-same-owner --file "$archive" \
+            --directory "$tool_dir" actionlint
+          test "$("$tool_dir/actionlint" -version | sed -n '1p')" = "$ACTIONLINT_VERSION"
+          "$tool_dir/actionlint" -config-file .github/actionlint.yaml
+          while IFS= read -r -d '' script; do
+            bash -n "$script"
+          done < <(git ls-files -z -- '*.sh')
+      - name: Validate release artifact smoke harness
+        run: |
+          set -euo pipefail
+          bash -n scripts/smoke-release-artifact.sh
+          bash scripts/smoke-release-artifact.sh --check-prerequisites
+          python3 scripts/check-release-archive.py self-test
+      - name: Validate repository governance policy
+        run: |
+          set -euo pipefail
+          python3 scripts/check-governance.py
+          python3 scripts/check-license-report.py self-test
+          python3 scripts/check-release-manifest.py self-test
+          python3 scripts/check-release-assets.py self-test
+          python3 scripts/check-release-state.py self-test
+          python3 scripts/check-release-tag.py self-test
+          python3 scripts/check-release-tag.py version-sync .
+          python3 scripts/check-sbom.py self-test
+          python3 benchmarks/run.py --self-test
+          python3 benchmarks/compare.py self-test
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: 1.96.0
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+        with:
+          key: linux-quality
+      - name: Check Rust source
+        run: |
+          set -euo pipefail
+          cargo fmt --all --check
+          cargo clippy --all-targets --all-features --locked -- --deny warnings
+          cargo clippy --all-targets --no-default-features --locked -- --deny warnings
+          cargo test --all-targets --all-features --locked
+          cargo test --all-targets --no-default-features --locked
+          RUSTDOCFLAGS="--deny warnings" cargo doc --no-deps --all-features --locked
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: npm
+          check-latest: false
+      - name: Check modern browser source
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts
+          npm audit --audit-level=high
+          npm run check
+
+  coverage:
+    name: Rust and frontend coverage trend
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUST_TEST_THREADS: "4"
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install Rust coverage toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: 1.96.0
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+        with:
+          key: linux-coverage
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: npm
+          check-latest: false
+      - name: Install pinned coverage tools
+        run: |
+          set -euo pipefail
+          cargo install --locked cargo-llvm-cov --version 0.8.6
+          npm ci --ignore-scripts
+      - name: Collect Rust coverage profiles
+        run: |
+          set -euo pipefail
+          cargo llvm-cov clean --workspace
+          cargo llvm-cov --no-report --all-targets --locked --remap-path-prefix
+          cargo llvm-cov --no-report --all-targets \
+            --no-default-features --locked --remap-path-prefix
+          mkdir -p coverage
+          cargo llvm-cov report --json --summary-only \
+            --ignore-filename-regex '(^|/)(tests|fuzz)/' \
+            --output-path coverage/rust-summary.json
+          cargo llvm-cov report --lcov \
+            --ignore-filename-regex '(^|/)(tests|fuzz)/' \
+            --output-path coverage/rust.lcov
+      - name: Collect frontend coverage
+        run: npm run test:coverage
+      - name: Report coverage trend
+        run: |
+          set -euo pipefail
+          node scripts/report-coverage.mjs
+          test -s coverage/rust-summary.json
+          test -s coverage/rust.lcov
+          test -s coverage/frontend/coverage-summary.json
+          test -s coverage/frontend/lcov.info
+          test -s coverage/summary.json
+      - name: Upload coverage reports
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: coverage-${{ github.sha }}
+          path: coverage/
+          if-no-files-found: warn
+          retention-days: 30
+
+  metadata-filesystems:
+    name: Atomic metadata policy on ext4 and XFS
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: 1.96.0
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+        with:
+          key: linux-metadata-filesystems
+      - name: Create isolated ext4 and XFS test mounts
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes xfsprogs
+          truncate --size 512M /tmp/ram-metadata-ext4.img
+          truncate --size 512M /tmp/ram-metadata-xfs.img
+          sudo mkfs.ext4 -q -F /tmp/ram-metadata-ext4.img
+          sudo mkfs.xfs -q -f /tmp/ram-metadata-xfs.img
+          sudo mkdir -p /mnt/ram-metadata-ext4 /mnt/ram-metadata-xfs
+          sudo mount -o loop /tmp/ram-metadata-ext4.img /mnt/ram-metadata-ext4
+          sudo mount -o loop /tmp/ram-metadata-xfs.img /mnt/ram-metadata-xfs
+          sudo chown "$(id -u):$(id -g)" /mnt/ram-metadata-ext4 /mnt/ram-metadata-xfs
+      - name: Test metadata policy on ext4
+        run: |
+          set -euo pipefail
+          TMPDIR=/mnt/ram-metadata-ext4 RAM_METADATA_EXPECT_FS=ext2/ext3 \
+            cargo test --all-features --test metadata --locked -- --nocapture
+      - name: Test metadata policy on XFS
+        run: |
+          set -euo pipefail
+          TMPDIR=/mnt/ram-metadata-xfs RAM_METADATA_EXPECT_FS=xfs \
+            cargo test --all-features --test metadata --locked -- --nocapture
+      - name: Unmount metadata test filesystems
+        if: always()
+        run: |
+          sudo umount /mnt/ram-metadata-xfs || true
+          sudo umount /mnt/ram-metadata-ext4 || true
+
+  privileged-unix-peer-identity:
+    name: Privileged Unix peer identity boundary
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: 1.96.0
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+        with:
+          key: linux-privileged-unix-peer-identity
+      - name: Prove distinct kernel UIDs have independent source buckets
+        run: |
+          set -euo pipefail
+          export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+          export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+          sudo -E env \
+            "PATH=$PATH" \
+            "CARGO_HOME=$CARGO_HOME" \
+            "RUSTUP_HOME=$RUSTUP_HOME" \
+            cargo test --all-features --locked --test bind \
+              real_unix_peer_uids_have_independent_source_buckets_and_logs -- \
+              --ignored --exact --test-threads=1
+
+  architecture:
+    name: Linux ARM64 tests
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: 1.96.0
+          targets: aarch64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+        with:
+          key: linux-aarch64
+      - name: Test ARM64 with and without TLS
+        run: |
+          set -euo pipefail
+          cargo test --all-targets --all-features --locked --target aarch64-unknown-linux-gnu
+          cargo test --all-targets --no-default-features --locked --target aarch64-unknown-linux-gnu
+
+  browser:
+    name: Browser behavior and accessibility
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: 1.96.0
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+        with:
+          key: linux-browser
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: npm
+          check-latest: false
+      - name: Install locked frontend dependencies
+        run: npm ci --ignore-scripts
+      - name: Install Chromium, Firefox, WebKit and system dependencies
+        run: npx playwright install --with-deps chromium firefox webkit
+      - name: Run browser and accessibility tests
+        run: npm run test:e2e
+
+  audit:
+    name: RustSec audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: 1.96.0
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit --version 0.22.2
+      - name: Audit dependencies
+        run: cargo audit --deny warnings
+
+  policy:
+    name: Dependency policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: 1.96.0
+      - name: Install dependency policy tools
+        run: |
+          cargo install --locked cargo-deny --version 0.20.2
+          cargo install --locked --features cli cargo-about --version 0.9.1
+      - name: Verify license policy alignment
+        run: python3 scripts/check-license-policy.py
+      - name: Smoke-test third-party license generation
+        run: |
+          set -euo pipefail
+          output="${RUNNER_TEMP}/THIRD-PARTY-LICENSES.html"
+          cargo about generate --locked --fail --all-features --config about.toml \
+            --output-file "$output" about.hbs
+          python3 scripts/check-license-report.py verify --project-directory . "$output"
+      - name: Verify production dependency boundary
+        run: ./scripts/check-production-deps.sh
+      - name: Check licenses, sources, bans, and advisories
+        run: cargo deny --locked check

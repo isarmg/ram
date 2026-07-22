@@ -1,0 +1,126 @@
+[package]
+name = "ram-fileserver"
+version = "0.47.0"
+edition = "2024"
+resolver = "3"
+rust-version = "1.96"
+authors = ["Ram contributors", "sigoden <sigoden@gmail.com>"]
+description = "A security-focused, Linux-only HTTP and WebDAV file server"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+homepage = "https://github.com/isarmg/ram"
+repository = "https://github.com/isarmg/ram"
+publish = ["crates-io"]
+categories = ["command-line-utilities", "web-programming::http-server"]
+keywords = ["static", "file", "server", "webdav", "cli"]
+include = [
+    "/src/**",
+    "/web/**",
+    "/about.toml",
+    "/about.hbs",
+    "/config.example.yaml",
+    "/CHANGELOG.md",
+    "/CONTRIBUTING.md",
+    "/SECURITY.md",
+    "/docs/CODE_FLOW.md",
+    "/docs/THREAT_MODEL.md",
+    "/docs/REPOSITORY_GOVERNANCE.md",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/README.md",
+    "/LICENSE-APACHE",
+    "/LICENSE-MIT",
+]
+
+[[bin]]
+name = "ram"
+path = "src/main.rs"
+
+[lib]
+name = "ram_fileserver"
+path = "src/lib.rs"
+
+[dependencies]
+clap = { version = "4.5", features = ["wrap_help", "env"] }
+clap_complete = "4.5"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "signal", "net"]}
+tokio-util = { version = "0.7", features = ["io-util"] }
+hyper = { version = "1", features = ["http1", "server"] }
+percent-encoding = "2.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
+zip = { version = "4", default-features = false, features = ["deflate"] }
+# 为安全敏感的 ETag/If-* 解析保留最新稳定 typed-header 实现。headers 0.4 的 WebSocket 类型
+# 仍引入 digest/sha1 0.10，而 argon2 0.5.3 也依赖该栈，因此替换不会移除 digest 0.10；
+# 待稳定上游汇聚后重新审查。
+# Keep the latest stable typed-header implementation for security-sensitive ETag/If-* parsing.
+# headers 0.4 and argon2 0.5.3 still pull digest/sha1 0.10; revisit when stable upstreams converge.
+headers = "0.4"
+mime_guess = "2.0"
+if-addrs = "0.15"
+tokio-rustls = { version = "0.26", optional = true }
+uuid = { version = "1.7", features = ["v4", "fast-rng"] }
+log = { version = "0.4", features = ["std"] }
+socket2 = "0.6"
+form_urlencoded = "1.2"
+alphanumeric-sort = "1.4"
+content_inspector = "0.2"
+anyhow = "1.0"
+chardetng = "1.0"
+glob = "0.3"
+indexmap = "2.2"
+serde_yaml_ng = "0.10"
+sha-crypt = "0.6"
+argon2 = "=0.5.3"
+base64 = "0.22"
+smart-default = "0.7"
+rustls-pki-types = "1.2"
+hyper-util = { version = "0.1", features = ["server-auto", "server-graceful", "tokio"] }
+http-body-util = "0.1"
+bytes = "1.5"
+pin-project-lite = "0.2"
+sha2 = "0.11.0"
+hmac = "0.13.0"
+hex = "0.4.3"
+rustix = { version = "1.1", features = ["fs", "process"] }
+getrandom = "0.4"
+quick-xml = "0.41"
+url = "2"
+
+[features]
+default = ["tls"]
+tls = ["tokio-rustls"]
+fuzzing = []
+
+[dev-dependencies]
+assert_cmd = "2"
+assert_fs = "1"
+# 确定性虚拟时间使看门狗截止测试不受 CI 调度争用影响。
+# Deterministic virtual time keeps watchdog deadline tests independent of CI scheduler contention.
+tokio = { version = "1", features = ["test-util"] }
+# 仅作为独立测试客户端参考；其无条件 MD5 依赖由 scripts/check-production-deps.sh 禁止进入
+# 普通/构建依赖图。
+# Independent test-client reference only. Its unconditional MD5 dependency is forbidden from the
+# normal/build graph by scripts/check-production-deps.sh.
+digest_auth = "0.3.1"
+h2 = "0.4"
+predicates = "3"
+regex = "1"
+reqwest = { version = "0.13", features = ["blocking", "http2", "multipart", "rustls"], default-features = false }
+rstest = "0.26.1"
+urlencoding = "2.1"
+# 黑盒集成测试用于验证 XML 转义和 URI 编码的独立参考实现。
+# Independent reference implementations used to validate XML escaping and URI encoding in black-box tests.
+xml-rs = "1.0.0"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+# 畸形请求不得把任务局部 panic 变成进程级中断；unwind 是此网络服务的最终遏制边界。
+# A malformed request must not turn a task-local panic into a process-wide outage; unwind is the
+# final containment boundary for this network service.
+panic = "unwind"
+strip = "symbols"

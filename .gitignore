@@ -1,0 +1,12 @@
+/target
+/node_modules
+/coverage
+/*.profraw
+__pycache__/
+*.py[cod]
+/.vscode
+/config.yaml
+/*.local.yaml
+/.env
+/.ram-token-revocations.json
+/.ram-token-revocations.json.lock

@@ -1,0 +1,460 @@
+:root {
+  color-scheme: light;
+  --bg-primary: #fff;
+  --bg-secondary: #fafafa;
+  --bg-tertiary: #fff;
+  --bg-hover: #fafafa;
+  --text-primary: #24292e;
+  --text-secondary: #5c5c5c;
+  --text-tertiary: #586069;
+  --text-accent: #0366d6;
+  --svg-primary: #24292e;
+  --svg-secondary: rgba(3, 47, 98, 0.5);
+  --svg-tertiary: #24292e;
+  --border-primary: #ddd;
+  --border-secondary: #ced4da;
+}
+
+html {
+  font-family: system-ui, sans-serif;
+  line-height: 1.5;
+  color: var(--text-primary);
+}
+
+body {
+  margin: 0;
+  background-color: var(--bg-primary);
+}
+
+svg {
+  fill: var(--svg-primary);
+}
+
+.hidden {
+  display: none !important;
+}
+
+.visually-hidden {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip-path: inset(50%) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
+
+.head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  padding: 0.6em 1em;
+  position: sticky;
+  top: 0;
+  background-color: var(--bg-tertiary);
+  gap: 0.35rem;
+  z-index: 1;
+}
+
+.breadcrumb {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 1.25em;
+  padding-right: 0.6em;
+  word-break: break-all;
+}
+
+.breadcrumb>a {
+  color: var(--text-accent);
+  text-decoration: none;
+}
+
+.breadcrumb>a:hover {
+  text-decoration: underline;
+}
+
+/* 最后一个面包屑 / Final breadcrumb */
+.breadcrumb>b {
+  color: var(--text-primary);
+}
+
+.breadcrumb>.separator {
+  color: var(--text-tertiary);
+  padding: 0 0.25em;
+}
+
+.breadcrumb svg {
+  height: 100%;
+  fill: var(--svg-secondary);
+}
+
+.toolbox {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-right: 10px;
+}
+
+.toolbox>a,
+.toolbox>button {
+  /* 与面包屑文本垂直对齐 / Vertically align with breadcrumb text */
+  height: 1.1rem;
+}
+
+.toolbox .control {
+  cursor: pointer;
+  padding: 0.15rem 0.25rem;
+}
+
+button.control,
+.action-btn,
+.save-btn,
+.logout-btn,
+.cancel-upload-btn,
+.retry-btn {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+/*
+ * 桌面鼠标用户也需要 WCAG 2.2 的 24 CSS px 最小目标；粗指针/窄屏规则
+ * 会在下方进一步扩大到 45 px。额外保留 1 px 布局余量，因为 Firefox
+ * 在设备像素换算后可能把精确的 24/44 px 暴露为略小于阈值的小数。
+ * `border-box` 使图标、padding 和最小值共用一个可预测的点击框。
+ *
+ * Desktop pointer users still need the WCAG 2.2 24 CSS-pixel minimum target;
+ * use a one-pixel layout margin because Firefox can expose an exact 24/44 CSS
+ * px box as a fraction just below the threshold after device-pixel conversion.
+ * The coarse-pointer/narrow-screen rule below expands it to 45px.
+ * `border-box` keeps icon, padding, and the minimum inside one predictable box.
+ */
+.control,
+.action-btn,
+.save-btn,
+.logout-btn,
+.cancel-upload-btn,
+.retry-btn {
+  box-sizing: border-box;
+  min-width: 25px;
+  min-height: 25px;
+}
+
+.searchbar {
+  display: flex;
+  flex-wrap: nowrap;
+  width: 246px;
+  min-height: 24px;
+  background-color: var(--bg-secondary);
+  transition: all .15s;
+  border: 1px var(--border-primary) solid;
+  border-radius: 15px;
+  margin-bottom: 2px;
+}
+
+.searchbar #search {
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  font-size: 16px;
+  line-height: 16px;
+  padding: 1px;
+  color: var(--text-primary);
+  background-color: transparent;
+  border: none;
+  outline: none;
+}
+
+/* 为键盘用户恢复可见焦点环（上方 outline:none 对所有用户移除了焦点环）。:focus-visible 只在
+   键盘焦点时显示，因此鼠标点击保持简洁。
+   Restore a visible keyboard focus ring. :focus-visible only shows for keyboard focus, so mouse
+   clicks stay clean. */
+.searchbar:focus-within {
+  outline: 2px solid var(--focus-ring, #4c8bf5);
+  outline-offset: 1px;
+}
+
+.searchbar #search:focus-visible {
+  outline: none;
+}
+
+.searchbar .icon {
+  color: var(--svg-tertiary);
+  padding: 3px 3px;
+  cursor: pointer;
+}
+
+.searchbar svg {
+  fill: var(--svg-tertiary);
+}
+
+.main {
+  padding: 0 1em;
+  overflow-x: auto;
+}
+
+.empty-folder {
+  font-style: italic;
+}
+
+.listing-notice {
+  margin: 0.5rem 0;
+  padding: 0.5rem 0.75rem;
+  color: var(--text-primary);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
+  border-left: 4px solid #b7791f;
+}
+
+.uploaders-table th,
+.paths-table th {
+  text-align: left;
+  font-weight: unset;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.uploaders-table td,
+.paths-table td {
+  white-space: nowrap;
+}
+
+.uploaders-table .cell-status {
+  width: 80px;
+  padding-left: 0.6em;
+}
+
+.cell-status span {
+  display: inline-block;
+}
+
+.upload-speed {
+  width: 80px;
+}
+
+.upload-progress {
+  margin-left: 5px;
+}
+
+.paths-table thead a {
+  color: unset;
+  text-decoration: none;
+}
+
+.paths-table thead a>span {
+  padding-left: 2px;
+}
+
+.paths-table tbody tr:hover {
+  background-color: var(--bg-hover);
+}
+
+.paths-table .cell-actions {
+  width: 90px;
+  padding-left: 0.5em;
+}
+
+.paths-table .cell-mtime {
+  width: 120px;
+  padding-left: 0.5em;
+  font-variant-numeric: tabular-nums;
+}
+
+.paths-table .cell-size {
+  text-align: right;
+  width: 70px;
+  padding-left: 0.5em;
+  font-variant-numeric: tabular-nums;
+}
+
+.path svg {
+  height: 16px;
+  fill: var(--svg-secondary);
+  padding-right: 0.5em;
+  vertical-align: text-top;
+}
+
+.path {
+  list-style: none;
+}
+
+.path a {
+  color: var(--text-accent);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow: hidden;
+  display: block;
+  text-decoration: none;
+  max-width: calc(100vw - 375px);
+  min-width: 170px;
+}
+
+.path a:hover {
+  text-decoration: underline;
+}
+
+.action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.15rem 0.3rem;
+  cursor: pointer;
+}
+
+.control:focus-visible,
+.action-btn:focus-visible,
+.save-btn:focus-visible,
+.logout-btn:focus-visible,
+.cancel-upload-btn:focus-visible,
+.retry-btn:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--focus-ring, #4c8bf5);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+.uploaders-table {
+  padding: 0.5em 0;
+}
+
+.uploader {
+  padding-right: 1em;
+}
+
+.editor {
+  box-sizing: border-box;
+  width: 100%;
+  height: calc(100vh - 5rem);
+  border: 1px solid var(--border-secondary);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  outline: none;
+  padding: 5px;
+}
+
+/* 用户要求减少动效时，焦点和布局不应继续播放宽度/颜色过渡。
+   Do not animate width/color transitions when the user requests reduced motion. */
+@media (prefers-reduced-motion: reduce) {
+  .searchbar {
+    transition: none;
+  }
+}
+
+.editor:focus-visible {
+  outline: 2px solid var(--focus-ring, #4c8bf5);
+  outline-offset: -1px;
+}
+
+.toolbox-right {
+  margin-left: auto;
+  margin-right: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.save-btn {
+  cursor: pointer;
+  user-select: none;
+}
+
+.logout-btn {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+}
+
+/* 粗指针和窄屏用户需要可靠点击区域；45 px 为 44 px 可访问性阈值留出一个像素的换算余量。
+   Coarse-pointer and narrow-screen users need reliable targets; 45px leaves one layout pixel of
+   conversion margin above the 44px accessibility threshold. */
+@media (pointer: coarse), (max-width: 600px) {
+  .control,
+  .action-btn,
+  .save-btn,
+  .logout-btn,
+  .cancel-upload-btn,
+  .retry-btn {
+    box-sizing: border-box;
+    min-width: 45px;
+    min-height: 45px;
+    touch-action: manipulation;
+  }
+
+  .searchbar,
+  .searchbar #search {
+    box-sizing: border-box;
+    min-height: 45px;
+  }
+}
+
+.user-name {
+  padding-left: 3px;
+}
+
+.not-editable {
+  font-style: italic;
+}
+
+.retry-btn,
+.cancel-upload-btn {
+  cursor: pointer;
+}
+
+@media (max-width: 600px) {
+  .head {
+    padding: 0.5rem;
+  }
+
+  .breadcrumb {
+    flex-basis: 100%;
+    font-size: 1.05rem;
+  }
+
+  .main {
+    padding: 0 0.5rem;
+  }
+
+  .searchbar {
+    flex: 1 1 11rem;
+    width: auto;
+    min-width: 0;
+  }
+
+  .paths-table .cell-mtime {
+    display: none;
+  }
+
+  .path a {
+    min-width: 7rem;
+    max-width: calc(100vw - 15rem);
+  }
+}
+
+@media (min-width: 768px) {
+  .path a {
+    min-width: 400px;
+  }
+}
+
+/* 深色主题 / Dark theme */
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --bg-primary: #000;
+    --bg-secondary: #111;
+    --bg-tertiary: #111;
+    --bg-hover: #1a1a1a;
+    --text-primary: #fff;
+    --text-secondary: #ddd;
+    --text-tertiary: #586069;  /* 两种配色不变 / Unchanged in both color schemes */
+    --text-accent: #3191ff;
+    --svg-primary: #fff;
+    --svg-secondary: #fff;
+    --svg-tertiary: #fff6;
+    --border-primary: #fff6;
+    --border-secondary: #ced4da; /* 两种配色不变 / Unchanged in both color schemes */
+  }
+}

@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "kind": "ram-performance-threshold-policy",
+  "description": "Dedicated-runner regression limits. Each baseline metric must match exactly one rule.",
+  "rules": [
+    {
+      "metric_pattern": "*/throughput_bytes_per_second_median",
+      "direction": "higher",
+      "max_regression_fraction": 0.15,
+      "absolute_tolerance": 0
+    },
+    {
+      "metric_pattern": "*/elapsed_seconds_median",
+      "direction": "lower",
+      "max_regression_fraction": 0.20,
+      "absolute_tolerance": 0.002
+    },
+    {
+      "metric_pattern": "*/requests_per_second",
+      "direction": "higher",
+      "max_regression_fraction": 0.15,
+      "absolute_tolerance": 0
+    },
+    {
+      "metric_pattern": "*/application_bytes_per_second",
+      "direction": "higher",
+      "max_regression_fraction": 0.15,
+      "absolute_tolerance": 0
+    },
+    {
+      "metric_pattern": "*/request_time_mean_seconds",
+      "direction": "lower",
+      "max_regression_fraction": 0.20,
+      "absolute_tolerance": 0.001
+    },
+    {
+      "metric_pattern": "*/rss_peak_bytes",
+      "direction": "lower",
+      "max_regression_fraction": 0.15,
+      "absolute_tolerance": 8388608
+    },
+    {
+      "metric_pattern": "*/fd_peak",
+      "direction": "lower",
+      "max_regression_fraction": 0.20,
+      "absolute_tolerance": 4
+    },
+    {
+      "metric_pattern": "*/thread_peak",
+      "direction": "lower",
+      "max_regression_fraction": 0.20,
+      "absolute_tolerance": 2
+    },
+    {
+      "metric_pattern": "*/blocking_queue_delay_proxy_ms",
+      "direction": "lower",
+      "max_regression_fraction": 0.30,
+      "absolute_tolerance": 1
+    }
+  ]
+}

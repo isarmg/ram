@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/isarmg/ram/benchmarks/schemas/thresholds.schema.json",
+  "title": "Ram performance threshold policy",
+  "type": "object",
+  "required": ["schema_version", "kind", "rules"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "kind": { "const": "ram-performance-threshold-policy" },
+    "description": { "type": "string" },
+    "rules": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["metric_pattern", "direction", "max_regression_fraction", "absolute_tolerance"],
+        "properties": {
+          "metric_pattern": { "type": "string", "minLength": 1 },
+          "direction": { "enum": ["higher", "lower"] },
+          "max_regression_fraction": { "type": "number", "minimum": 0, "exclusiveMaximum": 1 },
+          "absolute_tolerance": { "type": "number", "minimum": 0 }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}
