@@ -563,27 +563,27 @@ jobs:
           VERSION: ${{ needs.validate.outputs.version }}
         run: python3 scripts/check-release-assets.py local dist "$VERSION"
       - name: Attest release provenance
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
           subject-path: "dist/*.tar.gz"
       - name: Bind x86_64 SBOM to its release archive
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
           subject-path: dist/ram-v${{ needs.validate.outputs.version }}-x86_64-unknown-linux-gnu.tar.gz
           sbom-path: dist/ram-fileserver-x86_64-unknown-linux-gnu.cdx.json
       - name: Bind aarch64 SBOM to its release archive
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
           subject-path: dist/ram-v${{ needs.validate.outputs.version }}-aarch64-unknown-linux-gnu.tar.gz
           sbom-path: dist/ram-fileserver-aarch64-unknown-linux-gnu.cdx.json
       - name: Attest the x86_64 binary and SBOM digest manifest
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
           subject-path: dist/ram-v${{ needs.validate.outputs.version }}-x86_64-unknown-linux-gnu.tar.gz
           predicate-type: https://github.com/isarmg/ram/attestations/release-manifest/v1
           predicate-path: dist/ram-v${{ needs.validate.outputs.version }}-x86_64-unknown-linux-gnu.supply-chain.json
       - name: Attest the aarch64 binary and SBOM digest manifest
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
           subject-path: dist/ram-v${{ needs.validate.outputs.version }}-aarch64-unknown-linux-gnu.tar.gz
           predicate-type: https://github.com/isarmg/ram/attestations/release-manifest/v1
