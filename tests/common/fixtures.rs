@@ -8,7 +8,7 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Output, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
@@ -176,16 +176,17 @@ where
     TestServer::new(port, tmpdir, proc, is_tls, !has_auth, startup_tempdirs)
 }
 
-/// 构造一条标准的测试服务器命令：`RAM_NO_CONFIG` 隔离 + serve 路径 +
-/// 端口。调用方可继续 `.args(...)` 追加参数后交给 [`ServerProc::spawn`]。
-/// Build a standard isolated test-server command with serve path and port. Callers may append
-/// `.args(...)` before passing it to [`ServerProc::spawn`].
+/// 构造一条标准的测试服务器命令：移除宿主环境的显式配置路径，再设置 serve 路径与端口。
+/// 调用方可继续 `.args(...)` 追加参数后交给 [`ServerProc::spawn`]。
+/// Build a standard isolated test-server command by removing the host's explicit config path and
+/// setting the serve path and port. Callers may append `.args(...)` before passing it to
+/// [`ServerProc::spawn`].
 #[allow(dead_code)]
 pub fn ram_command(serve_path: &Path, port: u16) -> Command {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ram"));
-    // 保持测试封闭：测试二进制位于共享 target 目录，旁边遗留 config.yaml 不得泄入测试服务器。
-    // Keep tests hermetic: a stray config.yaml beside the shared-target test binary must not leak in.
-    cmd.env("RAM_NO_CONFIG", "1");
+    // 保持测试封闭：宿主环境的 RAM_CONFIG 不得把无关 YAML 注入测试服务器。
+    // Keep tests hermetic: a host RAM_CONFIG must not inject unrelated YAML into the test server.
+    cmd.env_remove("RAM_CONFIG");
     cmd.arg(serve_path).arg("-p").arg(port.to_string());
     cmd
 }
@@ -209,17 +210,6 @@ fn spawn_with_exec_retry(cmd: &mut Command) -> io::Result<Child> {
             Err(error) => return Err(error),
         }
     }
-}
-
-/// 对 [`Command::output`] 使用与长运行测试服务器相同的有界复制可执行文件重试。
-/// Run [`Command::output`] with the same bounded copied-executable retry used for long-running test
-/// servers.
-#[allow(dead_code)]
-pub fn command_output_with_exec_retry(cmd: &mut Command) -> io::Result<Output> {
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    spawn_with_exec_retry(cmd)?.wait_with_output()
 }
 
 fn alloc_test_port() -> u16 {

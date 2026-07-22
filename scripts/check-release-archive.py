@@ -27,14 +27,14 @@ TARGETS = ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu")
 BASE_FILES = frozenset(
     {
         "ram",
-        "LICENSE-APACHE",
-        "LICENSE-MIT",
+        "LICENSE",
         "README.md",
         "SECURITY.md",
         "CONTRIBUTING.md",
         "CHANGELOG.md",
         "config.example.yaml",
         "docs/CODE_FLOW.md",
+        "docs/PROJECT_STRUCTURE.md",
         "docs/REPOSITORY_GOVERNANCE.md",
         "docs/THREAT_MODEL.md",
         "ram-fileserver.spdx.json",
@@ -234,6 +234,10 @@ def self_test() -> None:
     stage = "ram-v1.2.3-x86_64-unknown-linux-gnu"
     if "docs/CODE_FLOW.md" not in BASE_FILES:
         raise AssertionError("code-flow documentation is absent from the release policy")
+    if "docs/PROJECT_STRUCTURE.md" not in BASE_FILES:
+        raise AssertionError("project-structure documentation is absent from the release policy")
+    if "LICENSE" not in BASE_FILES or {"LICENSE-APACHE", "LICENSE-MIT"} & BASE_FILES:
+        raise AssertionError("release policy does not enforce the single MIT LICENSE file")
     with tempfile.TemporaryDirectory(prefix="ram-release-archive-") as directory:
         root = pathlib.Path(directory)
         valid = root / "valid.tar.gz"
@@ -255,6 +259,10 @@ def self_test() -> None:
         unexpected = root / "unexpected.tar.gz"
         write_fixture(unexpected, stage, unexpected="docs/UNREVIEWED.md")
         expect_rejected(unexpected, stage)
+
+        legacy_license = root / "legacy-license.tar.gz"
+        write_fixture(legacy_license, stage, unexpected="LICENSE-APACHE")
+        expect_rejected(legacy_license, stage)
 
         linked_binary = root / "linked-binary.tar.gz"
         write_fixture(linked_binary, stage, link_member=f"{stage}/ram")

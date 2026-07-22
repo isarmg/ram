@@ -13,7 +13,7 @@ pub(crate) use access::HttpLogger;
 #[cfg(feature = "fuzzing")]
 pub(crate) use access::fuzz_log_format;
 
-use crate::path_identity::{ObjectIdentity, OutputPathIdentity};
+use crate::identity::{ObjectIdentity, OutputPathIdentity};
 use crate::utils::is_trusted_file_owner;
 use anyhow::{Context, Result};
 use log::{Level, LevelFilter, Metadata, Record};
@@ -557,7 +557,7 @@ mod tests {
     use super::{
         AsyncLogger, Command, Destination, FlushOutcome, RotatingFile, rotated_path, writer_loop,
     };
-    use crate::path_identity::OutputPathIdentity;
+    use crate::identity::OutputPathIdentity;
     use assert_fs::TempDir;
     use log::Level;
     use std::io::Write as _;

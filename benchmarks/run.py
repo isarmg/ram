@@ -1244,8 +1244,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--server-cpus", type=parse_cpu_list, default=[])
     parser.add_argument("--client-cpus", type=parse_cpu_list, default=[])
     parser.add_argument("--strict-environment", action="store_true")
-    parser.add_argument("--tls-cert", type=Path, default=REPOSITORY_ROOT / "tests/data/cert.pem")
-    parser.add_argument("--tls-key", type=Path, default=REPOSITORY_ROOT / "tests/data/key_pkcs8.pem")
+    parser.add_argument(
+        "--tls-cert",
+        type=Path,
+        default=REPOSITORY_ROOT / "tests/fixtures/tls/cert.pem",
+    )
+    parser.add_argument(
+        "--tls-key",
+        type=Path,
+        default=REPOSITORY_ROOT / "tests/fixtures/tls/key_pkcs8.pem",
+    )
     parser.add_argument("--self-test", action="store_true")
     return parser
 

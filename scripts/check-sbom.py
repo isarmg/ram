@@ -4,6 +4,7 @@
 固定 cargo-cyclonedx 生成器记录普通和构建依赖，而 cargo-sbom 有意省略构建及开发依赖。
 因此本检查器要求 CycloneDX 精确覆盖普通/构建依赖图，SPDX 精确覆盖普通依赖图。已知
 lib/bin 子组件匹配到 Cargo target，其他嵌套组件仍视为包；两份文档都不得含仅开发包。
+根包许可证还必须与 Cargo 元数据精确一致；第三方依赖继续保留各自的许可证。
 
 Semantically validate release SBOMs against Cargo's locked dependency graph.
 
@@ -13,7 +14,8 @@ This checker therefore requires the CycloneDX document to exactly cover the
 normal/build graph and the SPDX document to exactly cover the normal graph.
 Known lib/bin subcomponents are matched to Cargo targets; every other nested
 component is still treated as a package. Neither document may contain a
-development-only package.
+development-only package. The root package's license must also exactly match
+Cargo metadata; dependency licenses remain governed by their own packages.
 """
 
 from __future__ import annotations
@@ -133,6 +135,7 @@ def dependency_sets(
     metadata: dict[str, Any],
 ) -> tuple[
     PackageKey,
+    str,
     PackageCounts,
     PackageCounts,
     PackageCounts,
@@ -342,9 +345,14 @@ def dependency_sets(
     normal_ids = traverse(normal_kinds)
     production_ids = traverse(production_kinds)
     all_ids = traverse(frozenset((None, "build", "dev")))
-    root = package_key(packages[root_id], "cargo metadata root package", "version")
+    root_package = packages[root_id]
+    root = package_key(root_package, "cargo metadata root package", "version")
+    root_license = require_string(
+        root_package.get("license"), "cargo metadata root package.license"
+    )
     return (
         root,
+        root_license,
         count(normal_ids),
         count(production_ids),
         count(all_ids - production_ids),
@@ -515,6 +523,7 @@ def optional_cyclonedx_target_key(
 def verify_cyclonedx(
     document: dict[str, Any],
     root: PackageKey,
+    root_license: str,
     expected: PackageCounts,
     development_only: PackageCounts,
     expected_targets: Counter[CargoTargetKey],
@@ -577,6 +586,25 @@ def verify_cyclonedx(
     if package_key(root_component, "CycloneDX root component", "version") != root:
         raise SbomVerificationError(
             "CycloneDX root component name/version does not match Cargo metadata"
+        )
+    root_licenses = require_list(
+        root_component.get("licenses"), "CycloneDX root component.licenses"
+    )
+    if len(root_licenses) != 1:
+        raise SbomVerificationError(
+            "CycloneDX root component must contain exactly one Cargo license expression"
+        )
+    root_license_entry = require_object(
+        root_licenses[0], "CycloneDX root component.licenses[0]"
+    )
+    observed_root_license = require_string(
+        root_license_entry.get("expression"),
+        "CycloneDX root component.licenses[0].expression",
+    )
+    if observed_root_license != root_license:
+        raise SbomVerificationError(
+            "CycloneDX root component license does not match Cargo metadata: "
+            f"expected {root_license!r}, found {observed_root_license!r}"
         )
     top_components = require_list(document.get("components"), "CycloneDX components")
     package_components = [(root_component, "CycloneDX root component")]
@@ -710,6 +738,7 @@ def verify_cyclonedx(
 def verify_spdx(
     document: dict[str, Any],
     root: PackageKey,
+    root_license: str,
     expected: PackageCounts,
     development_only: PackageCounts,
     expected_edges: set[DependencyEdge],
@@ -763,6 +792,11 @@ def verify_spdx(
             if license_value in ("NONE", "NOASSERTION"):
                 raise SbomVerificationError(
                     f"{location}.{license_field} must identify the package license"
+                )
+            if key == root and license_value != root_license:
+                raise SbomVerificationError(
+                    f"SPDX root package {license_field} does not match Cargo metadata: "
+                    f"expected {root_license!r}, found {license_value!r}"
                 )
     if root_count != 1:
         raise SbomVerificationError(
@@ -855,6 +889,7 @@ def verify_documents(
 ) -> tuple[PackageKey, int, int]:
     (
         root,
+        root_license,
         normal,
         production,
         development_only,
@@ -869,6 +904,7 @@ def verify_documents(
     verify_cyclonedx(
         cyclonedx,
         root,
+        root_license,
         production,
         development_only,
         cargo_targets,
@@ -879,6 +915,7 @@ def verify_documents(
     verify_spdx(
         spdx,
         root,
+        root_license,
         normal,
         development_only,
         normal_edges,
@@ -892,6 +929,7 @@ def verify_target_cyclonedx(
 ) -> tuple[PackageKey, int]:
     (
         root,
+        root_license,
         _normal,
         production,
         development_only,
@@ -906,6 +944,7 @@ def verify_target_cyclonedx(
     verify_cyclonedx(
         cyclonedx,
         root,
+        root_license,
         production,
         development_only,
         cargo_targets,
@@ -921,6 +960,7 @@ def verify_global_spdx(
 ) -> tuple[PackageKey, int]:
     (
         root,
+        root_license,
         normal,
         _production,
         development_only,
@@ -935,6 +975,7 @@ def verify_global_spdx(
     verify_spdx(
         spdx,
         root,
+        root_license,
         normal,
         development_only,
         normal_edges,
@@ -956,6 +997,7 @@ def fixtures() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
                 "id": package_ids["root"],
                 "name": "app",
                 "version": "1.2.3",
+                "license": "MIT",
                 "source": None,
                 "manifest_path": "/project/Cargo.toml",
                 "targets": [
@@ -1131,6 +1173,24 @@ def self_test() -> None:
     wrong_root = copy.deepcopy(cyclonedx)
     wrong_root["metadata"]["component"]["version"] = "9.9.9"
     invalid_documents.append((wrong_root, spdx))
+
+    wrong_cyclonedx_root_license = copy.deepcopy(cyclonedx)
+    wrong_cyclonedx_root_license["metadata"]["component"]["licenses"] = [
+        {"expression": "MIT OR Apache-2.0"}
+    ]
+    invalid_documents.append((wrong_cyclonedx_root_license, spdx))
+
+    wrong_spdx_declared_license = copy.deepcopy(spdx)
+    wrong_spdx_declared_license["packages"][0]["licenseDeclared"] = (
+        "MIT OR Apache-2.0"
+    )
+    invalid_documents.append((cyclonedx, wrong_spdx_declared_license))
+
+    wrong_spdx_concluded_license = copy.deepcopy(spdx)
+    wrong_spdx_concluded_license["packages"][0]["licenseConcluded"] = (
+        "MIT OR Apache-2.0"
+    )
+    invalid_documents.append((cyclonedx, wrong_spdx_concluded_license))
 
     wrong_cyclonedx_source = copy.deepcopy(cyclonedx)
     old_reference = wrong_cyclonedx_source["components"][0]["bom-ref"]

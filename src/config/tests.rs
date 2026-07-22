@@ -618,7 +618,7 @@ mod p1_config_source_tests {
 
         let (_cert_temp, cert) = capture_then_replace_parent(
             "server.crt",
-            include_bytes!("../../tests/data/cert.pem"),
+            include_bytes!("../../tests/fixtures/tls/cert.pem"),
             b"not a certificate\n",
         );
         let certs =
@@ -628,7 +628,7 @@ mod p1_config_source_tests {
 
         let (_key_temp, key) = capture_then_replace_parent(
             "server.key",
-            include_bytes!("../../tests/data/key_pkcs8.pem"),
+            include_bytes!("../../tests/fixtures/tls/key_pkcs8.pem"),
             b"not a private key\n",
         );
         load_private_key_from_reader(key.open_regular_file_pinned().unwrap(), key.canonical())

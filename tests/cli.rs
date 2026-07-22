@@ -14,7 +14,7 @@ use std::process::Command;
 /// 显示帮助并退出。 / Show help and exit.
 fn help_shows() -> Result<(), Error> {
     Command::new(assert_cmd::cargo::cargo_bin!("ram"))
-        .env("RAM_NO_CONFIG", "1")
+        .env_remove("RAM_CONFIG")
         .arg("-h")
         .assert()
         .success()
@@ -27,7 +27,7 @@ fn help_shows() -> Result<(), Error> {
 /// 报告已安装命令名，而非库 crate 名。 / Report the installed command name rather than the library crate name.
 fn version_uses_public_command_name() -> Result<(), Error> {
     Command::new(assert_cmd::cargo::cargo_bin!("ram"))
-        .env("RAM_NO_CONFIG", "1")
+        .env_remove("RAM_CONFIG")
         .arg("--version")
         .assert()
         .success()
@@ -42,7 +42,7 @@ fn print_completions() -> Result<(), Error> {
     // 示例 / Example: let shell_enums = EnumValueParser::<Shell>::new();
     for shell in Shell::value_variants() {
         Command::new(assert_cmd::cargo::cargo_bin!("ram"))
-            .env("RAM_NO_CONFIG", "1")
+            .env_remove("RAM_CONFIG")
             .arg("--completions")
             .arg(shell.to_string())
             .assert()
@@ -55,7 +55,7 @@ fn print_completions() -> Result<(), Error> {
 #[test]
 fn check_config_conflicts_with_completion_generation() -> Result<(), Error> {
     Command::new(assert_cmd::cargo::cargo_bin!("ram"))
-        .env("RAM_NO_CONFIG", "1")
+        .env_remove("RAM_CONFIG")
         .args(["--check-config", "--completions", "bash"])
         .assert()
         .failure()
@@ -67,7 +67,7 @@ fn check_config_conflicts_with_completion_generation() -> Result<(), Error> {
 #[test]
 fn tls_environment_is_rejected_without_tls_feature() -> Result<(), Error> {
     Command::new(assert_cmd::cargo::cargo_bin!("ram"))
-        .env("RAM_NO_CONFIG", "1")
+        .env_remove("RAM_CONFIG")
         .env("RAM_TLS_CERT", "cert.pem")
         .env("RAM_TLS_KEY", "key.pem")
         .args(["--check-config", "--auth", "user:pass@/:rw"])

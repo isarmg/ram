@@ -60,9 +60,8 @@
 
 use crate::{
     config::Args,
-    path_identity::{ObjectIdentity, OutputPathIdentity},
+    identity::{ObjectIdentity, OutputPathIdentity, SourceIdentity},
     server::Response,
-    source_identity::SourceIdentity,
     utils::{is_trusted_file_owner, unix_now},
 };
 
@@ -1754,4 +1753,9 @@ fn decode_basic_credentials(authorization: &HeaderValue) -> Option<(String, Stri
 }
 
 #[cfg(test)]
+// 物理目录刻意避开 `tests/`，以免命中覆盖率的集成测试排除规则；逻辑模块名仍保持
+// `tests`，从而维持被子进程 `--exact` 调用的测试路径。
+// The physical directory deliberately avoids `tests/`, which the coverage job excludes as an
+// integration-test tree. The logical module remains `tests` to preserve subprocess `--exact` paths.
+#[path = "test_suite/mod.rs"]
 mod tests;

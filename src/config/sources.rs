@@ -58,48 +58,38 @@ pub(super) fn apply_yaml_capability_aggregate(args: &mut Args, yaml_keys: &HashS
 }
 
 impl Args {
-    /// 优先选择显式 CLI/环境配置；`RAM_NO_CONFIG` 只禁用旧式相邻自动发现，不压制显式请求。
-    /// Prefer explicit CLI/env config; `RAM_NO_CONFIG` disables only legacy adjacent discovery, never an explicit request.
+    /// YAML 只能由 `--config` 或 `RAM_CONFIG` 显式选择；相对路径以进程 cwd 为基准。
+    /// YAML must be selected explicitly with `--config` or `RAM_CONFIG`; relative paths use the process cwd.
     pub fn parse(matches: ArgMatches, purpose: ParsePurpose) -> Result<Args> {
         let cwd = env::current_dir().with_context(|| "Failed to determine current directory")?;
-        let explicit_config = matches
+        let config_path = matches
             .get_one::<PathBuf>("config")
             .map(|path| Self::resolve_relative_path(path, &cwd));
-        let legacy_auto_config = explicit_config.is_none();
-        let config_path = explicit_config.or_else(Self::default_config_path);
-        Self::parse_with_config_for(
-            matches,
-            config_path.as_deref(),
-            purpose,
-            legacy_auto_config && config_path.is_some(),
-        )
+        Self::parse_with_config_for(matches, config_path.as_deref(), purpose)
     }
 
     /// 真正的"配置文件为基底、命令行覆盖"合并逻辑。
-    /// 单独拆出来可让显式配置路径与自动发现路径共用同一套合并规则。
-    /// Core file-as-base, CLI-overrides merge shared by explicit and auto-discovered config paths.
+    /// 单独拆出来可让单元测试直接覆盖显式 YAML 与命令行的合并规则。
+    /// Core file-as-base, CLI-overrides merge, exposed separately for focused unit tests.
     #[cfg(test)]
     pub(super) fn parse_with_config(
         matches: ArgMatches,
         config_path: Option<&Path>,
     ) -> Result<Args> {
-        Self::parse_with_config_for(matches, config_path, ParsePurpose::Run, false)
+        Self::parse_with_config_for(matches, config_path, ParsePurpose::Run)
     }
 
     pub(super) fn parse_with_config_for(
         matches: ArgMatches,
         config_path: Option<&Path>,
         purpose: ParsePurpose,
-        legacy_auto_config: bool,
     ) -> Result<Args> {
         let mut args = Self::default();
         let mut startup_inputs = Vec::new();
         let cwd = env::current_dir().with_context(|| "Failed to determine current directory")?;
-        // 自动加载的配置文件里写的相对 `serve-path`/`assets`，必须按
-        // 配置文件自己所在目录解析，而不是进程工作目录：配置文件总在
-        // 二进制旁边，而 cwd 取决于进程怎么被拉起的（比如 systemd 单元
-        // 配了 `WorkingDirectory=/`）——按 cwd 解析可能悄悄 serve 出
-        // 运维完全没打算暴露的目录（比如 `/`）。
+        // 显式 YAML 里写的相对 `serve-path`/`assets`，必须按配置文件自己
+        // 所在目录解析，而不是进程工作目录。服务管理器可能把 cwd 设为 `/`；
+        // 若按 cwd 解析，可能悄悄暴露运维者完全没打算服务的目录。
         // English: Resolve YAML-relative serve/assets paths against the config
         // directory, not cwd, which service managers may set to an unintended root.
         let config_dir = config_path.and_then(|p| p.parent()).map(Path::to_path_buf);
@@ -110,9 +100,6 @@ impl Args {
             (args, yaml_keys, config_identity) = Self::load_config(config_path)?;
             startup_inputs.push(config_identity);
             apply_yaml_capability_aggregate(&mut args, &yaml_keys);
-            if legacy_auto_config {
-                eprintln!("WARNING: {LEGACY_AUTO_CONFIG_WARNING}");
-            }
         }
 
         let serve_path_from_cli = matches.get_one::<PathBuf>("serve-path").is_some();
@@ -181,7 +168,7 @@ impl Args {
         args.uri_prefix = if args.path_prefix.is_empty() {
             "/".to_owned()
         } else {
-            format!("/{}/", &encode_uri(&args.path_prefix))
+            format!("/{}/", encode_uri(&args.path_prefix))
         };
 
         if let Some(hidden) = matches.get_many::<String>("hidden") {
@@ -834,25 +821,9 @@ impl Args {
         Ok((args, keys, identity))
     }
 
-    /// 默认配置是可执行文件旁存在的 `config.yaml`。 / Default config is an existing executable-adjacent `config.yaml`.
-    pub(super) fn default_config_path() -> Option<PathBuf> {
-        // 中文：这是相邻 config 自动加载的逃生门，锁定部署可防同目录误放文件改变配置。
-        // English: Escape hatch for adjacent auto-loading, preventing stray colocated files from changing locked deployments.
-        if env::var_os("RAM_NO_CONFIG").is_some() {
-            return None;
-        }
-        let exe_path = env::current_exe().ok()?;
-        Self::default_config_path_from_exe(&exe_path)
-    }
-
-    pub(super) fn default_config_path_from_exe(exe_path: &Path) -> Option<PathBuf> {
-        let config_path = exe_path.parent()?.join(DEFAULT_CONFIG_FILE);
-        config_path.is_file().then_some(config_path)
-    }
-
     /// 把 `path` 解析成规范化的绝对路径。相对路径基于 `base` 解析
-    /// （由调用方决定：命令行来的用进程 cwd，自动加载的配置文件来的
-    /// 用配置文件所在目录），而不是隐式相对 cwd。
+    /// （由调用方决定：CLI/环境路径用进程 cwd，YAML 内部路径用配置文件
+    /// 所在目录），而不是在此处隐式选择 cwd。
     /// Resolve to an absolute normalized path against an explicit base selected by the source, never an implicit cwd.
     pub(super) fn sanitize_path<P: AsRef<Path>>(path: P, base: &Path) -> Result<PathBuf> {
         let path = path.as_ref();

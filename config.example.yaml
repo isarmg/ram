@@ -1,19 +1,14 @@
 # Ram 配置示例；编辑前请复制到 `/etc/ram/config.yaml`。
 # Example Ram configuration. Copy this file to `/etc/ram/config.yaml` before editing.
 #
-# 推荐使用 `ram --config /etc/ram/config.yaml`（或 RAM_CONFIG）。v0.47.x-v0.49.x 至少 90 天内
-# 仍自动发现可执行文件旁的 config.yaml，实际加载时发出弃用警告。v0.50 默认关闭发现，只在
-# 该发布线提供 RAM_LEGACY_AUTO_CONFIG=1；v0.51 移除发现。RAM_NO_CONFIG 只关闭发现（即使值
-# 为空、`0` 或 `false`），绝不抑制显式配置路径。可用下方命令在不启动监听器或修改运行状态
-# 的情况下验证；成功结果必须是 stdout 精确输出 `Configuration OK` 且退出码为 0：
-# Prefer `ram --config /etc/ram/config.yaml` (or RAM_CONFIG). A config.yaml next
-# to the executable is still auto-discovered during v0.47.x-v0.49.x for at
-# least 90 days, with a deprecation warning when it is actually loaded. v0.50
-# disables discovery by default and offers RAM_LEGACY_AUTO_CONFIG=1 for that
-# release line only; v0.51 removes discovery. The presence of RAM_NO_CONFIG
-# (even empty, `0`, or `false`) disables only discovery and never suppresses an
-# explicit config path. Validate this file without starting listeners or
-# mutating runtime state with:
+# 必须使用 `ram --config /etc/ram/config.yaml`（或 `RAM_CONFIG`）显式选择此文件。若两者均未
+# 设置，Ram 不会加载 YAML，也不会扫描进程工作目录或可执行文件所在目录。可用下方命令在
+# 不启动监听器或修改运行状态的情况下验证；成功结果必须是 stdout 精确输出
+# `Configuration OK` 且退出码为 0：
+# Select this file explicitly with `ram --config /etc/ram/config.yaml` (or
+# `RAM_CONFIG`). Without either selector, Ram loads no YAML and scans neither
+# the process working directory nor the executable directory. Validate this
+# file without starting listeners or mutating runtime state with:
 #   ram --check-config --config /etc/ram/config.yaml
 # Success is exactly `Configuration OK` on stdout with exit status 0.
 #

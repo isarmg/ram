@@ -4,8 +4,7 @@
 /src/http/ @isarmg @sigoden
 /src/runtime/ @isarmg @sigoden
 /src/server/ @isarmg @sigoden
-/src/path_identity.rs @isarmg @sigoden
-/src/source_identity.rs @isarmg @sigoden
+/src/identity/ @isarmg @sigoden
 /src/main.rs @isarmg @sigoden
 /src/lib.rs @isarmg @sigoden
 /web/ @isarmg @sigoden
@@ -15,9 +14,11 @@
 /.github/workflows/ @isarmg @sigoden
 /.github/actionlint.yaml @isarmg @sigoden
 /.github/workflows/fuzz.yaml @isarmg @sigoden
-/.github/coverage-baseline.json @isarmg @sigoden
+/tests/coverage/ @isarmg @sigoden
 /.github/CODEOWNERS @isarmg @sigoden
 /scripts/check-governance.py @isarmg @sigoden
+/scripts/check-fuzz-layout.py @isarmg @sigoden
+/scripts/check-license-policy.py @isarmg @sigoden
 /scripts/check-license-report.py @isarmg @sigoden
 /scripts/check-release-manifest.py @isarmg @sigoden
 /scripts/check-release-archive.py @isarmg @sigoden
@@ -31,13 +32,18 @@
 /benchmarks/ @isarmg @sigoden
 /Cargo.toml @isarmg @sigoden
 /Cargo.lock @isarmg @sigoden
+/LICENSE @isarmg @sigoden
+/about.toml @isarmg @sigoden
+/about.hbs @isarmg @sigoden
 /deny.toml @isarmg @sigoden
 /package.json @isarmg @sigoden
 /package-lock.json @isarmg @sigoden
 /SECURITY.md @isarmg @sigoden
 /docs/CODE_FLOW.md @isarmg @sigoden
+/docs/PROJECT_STRUCTURE.md @isarmg @sigoden
 /docs/THREAT_MODEL.md @isarmg @sigoden
 /docs/REPOSITORY_GOVERNANCE.md @isarmg @sigoden
+/release-metadata/README.md @isarmg @sigoden
 
 # 默认兜底属主。 / Default fallback owner.
 * @isarmg @sigoden

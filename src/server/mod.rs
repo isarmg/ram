@@ -136,8 +136,8 @@ use crate::http::{
     ResourceMethod, ResourceRoute, ResponseBodyCompletion, ResponseBodyOutcome, body_full,
     body_with_completion_observer, body_with_request_permits,
 };
+use crate::identity::{PeerIdentity, SourceIdentity, TrustedProxyPolicy};
 use crate::logging::HttpLogger;
-use crate::source_identity::{PeerIdentity, SourceIdentity, TrustedProxyPolicy};
 use crate::utils::{decode_uri, encode_uri, get_file_name};
 
 use anyhow::{Context, Result, bail};
@@ -907,7 +907,7 @@ mod mutation_lock_tests {
 #[cfg(test)]
 mod keyed_limit_tests {
     use super::KeyedLimit;
-    use crate::source_identity::SourceIdentity;
+    use crate::identity::SourceIdentity;
     use anyhow::Result;
 
     #[test]

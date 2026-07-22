@@ -260,7 +260,7 @@ start_server() {
   port=$(allocate_port)
   SERVER_PORT=$port
   server_pid=
-  RAM_NO_CONFIG=1 "$binary" "$data_dir" \
+  env -u RAM_CONFIG "$binary" "$data_dir" \
     --bind 127.0.0.1 \
     --port "$port" \
     --auth-file "$auth_file" \

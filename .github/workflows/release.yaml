@@ -28,22 +28,22 @@ jobs:
       crate_exists: ${{ steps.crates_version.outputs.exists }}
       crate_checksum: ${{ steps.crates_version.outputs.checksum }}
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 0
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
         with:
-          toolchain: 1.96.0
+          toolchain: 1.97.1
           components: clippy, rustfmt
       - name: Install Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24
+          node-version: 24.18.0
           cache: npm
           check-latest: false
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           key: linux-release-validation
       - name: Install supply-chain checks
@@ -221,7 +221,7 @@ jobs:
           printf '%s\n' "$actual_checksum" \
             >"verified-source/ram-fileserver-${VERSION}.crate.sha256"
       - name: Upload the verified crates.io source package
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: verified-source-package
           path: verified-source/*
@@ -248,14 +248,14 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
         with:
-          toolchain: 1.96.0
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+          toolchain: 1.97.1
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - name: Install pinned inventory tools
         run: |
           cargo install --locked cargo-cyclonedx --version 0.5.9
@@ -271,22 +271,26 @@ jobs:
             output="ram-fileserver-${target}.cdx"
             cargo cyclonedx --all-features --format json --target "$target" \
               --license-strict --override-filename "$output"
-            install -m 0644 "$output.json" "release-metadata/$output.json"
+            mv "$output.json" "release-metadata/$output.json"
             python3 scripts/check-sbom.py verify-target --project-directory . \
               --target "$target" "release-metadata/$output.json"
           done
           cargo sbom --output-format spdx_json_2_3 > release-metadata/ram-fileserver.spdx.json
           cargo about generate --locked --fail --all-features --config about.toml \
+            --target x86_64-unknown-linux-gnu --target aarch64-unknown-linux-gnu \
             --output-file release-metadata/THIRD-PARTY-LICENSES.html about.hbs
           python3 scripts/check-sbom.py verify-spdx --project-directory . \
             release-metadata/ram-fileserver.spdx.json
           python3 scripts/check-license-report.py verify --project-directory . \
             release-metadata/THIRD-PARTY-LICENSES.html
       - name: Upload release metadata
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: supply-chain-metadata
-          path: release-metadata/*
+          path: |
+            release-metadata/ram-fileserver-*.cdx.json
+            release-metadata/ram-fileserver.spdx.json
+            release-metadata/THIRD-PARTY-LICENSES.html
           if-no-files-found: error
           retention-days: 7
 
@@ -308,19 +312,19 @@ jobs:
             machine: AArch64
             rustflags: -C target-cpu=generic
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install Rust target
-        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
         with:
-          toolchain: 1.96.0
+          toolchain: 1.97.1
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           key: ${{ matrix.target }}
       - name: Download verified supply-chain metadata
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: supply-chain-metadata
           path: release-metadata
@@ -339,7 +343,7 @@ jobs:
           stage="dist/$name"
           mkdir -p "$stage"
           install -m 0755 "target/${TARGET}/release/ram" "$stage/ram"
-          cp LICENSE-APACHE LICENSE-MIT README.md SECURITY.md CONTRIBUTING.md \
+          cp LICENSE README.md SECURITY.md CONTRIBUTING.md \
             CHANGELOG.md config.example.yaml "$stage/"
           cp -R docs "$stage/"
           cp "release-metadata/ram-fileserver-${TARGET}.cdx.json" \
@@ -391,14 +395,14 @@ jobs:
             "smoke-diagnostics/$TARGET"
       - name: Upload failed release smoke diagnostics
         if: ${{ always() && steps.artifact_smoke.outcome == 'failure' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-smoke-${{ matrix.target }}
           path: smoke-diagnostics/${{ matrix.target }}
           if-no-files-found: error
           retention-days: 14
       - name: Upload build artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-${{ matrix.target }}
           path: |
@@ -425,7 +429,7 @@ jobs:
       attestations: write
       artifact-metadata: write
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Reject a published release or clean an exact failed draft
@@ -548,13 +552,13 @@ jobs:
             exit 1
           fi
       - name: Download verified build artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: release-*
           path: dist
           merge-multiple: true
       - name: Download verified supply-chain metadata
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: supply-chain-metadata
           path: dist
@@ -563,27 +567,27 @@ jobs:
           VERSION: ${{ needs.validate.outputs.version }}
         run: python3 scripts/check-release-assets.py local dist "$VERSION"
       - name: Attest release provenance
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
           subject-path: "dist/*.tar.gz"
       - name: Bind x86_64 SBOM to its release archive
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
           subject-path: dist/ram-v${{ needs.validate.outputs.version }}-x86_64-unknown-linux-gnu.tar.gz
           sbom-path: dist/ram-fileserver-x86_64-unknown-linux-gnu.cdx.json
       - name: Bind aarch64 SBOM to its release archive
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
           subject-path: dist/ram-v${{ needs.validate.outputs.version }}-aarch64-unknown-linux-gnu.tar.gz
           sbom-path: dist/ram-fileserver-aarch64-unknown-linux-gnu.cdx.json
       - name: Attest the x86_64 binary and SBOM digest manifest
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
           subject-path: dist/ram-v${{ needs.validate.outputs.version }}-x86_64-unknown-linux-gnu.tar.gz
           predicate-type: https://github.com/isarmg/ram/attestations/release-manifest/v1
           predicate-path: dist/ram-v${{ needs.validate.outputs.version }}-x86_64-unknown-linux-gnu.supply-chain.json
       - name: Attest the aarch64 binary and SBOM digest manifest
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
           subject-path: dist/ram-v${{ needs.validate.outputs.version }}-aarch64-unknown-linux-gnu.tar.gz
           predicate-type: https://github.com/isarmg/ram/attestations/release-manifest/v1
@@ -680,18 +684,18 @@ jobs:
       name: crates-io
       url: https://crates.io/crates/ram-fileserver/${{ needs.validate.outputs.version }}
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
         with:
-          toolchain: 1.96.0
+          toolchain: 1.97.1
       - name: Request a short-lived crates.io credential
         id: crates-auth
         uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
       - name: Download the verified source package
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: verified-source-package
           path: verified-source
@@ -795,17 +799,17 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Download verified build artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: release-*
           path: dist
           merge-multiple: true
       - name: Download verified supply-chain metadata
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: supply-chain-metadata
           path: dist

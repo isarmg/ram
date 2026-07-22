@@ -31,8 +31,10 @@ const webServerEnvironment = {
   RAM_E2E_DATA_DIR: dataDirectory,
   RAM_E2E_PORT: String(port),
   RAM_E2E_TOKEN_REVOCATION_FILE: tokenRevocationFile,
-  RAM_NO_CONFIG: "1",
 };
+// 不允许调用 Playwright 的宿主通过显式配置路径改变 E2E 服务器。
+// Do not let the Playwright caller alter the E2E server through an explicit config path.
+delete webServerEnvironment.RAM_CONFIG;
 if (process.env.RAM_E2E_CARGO_TARGET_DIR) {
   webServerEnvironment.CARGO_TARGET_DIR = process.env.RAM_E2E_CARGO_TARGET_DIR;
 }

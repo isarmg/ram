@@ -20,16 +20,16 @@ use std::time::{Duration, Instant};
 /// 可使用 TLS 启动服务器并接收加密响应。 / Start with TLS and receive encrypted responses.
 #[rstest]
 #[case(server(&[
-        "--tls-cert", "tests/data/cert.pem",
-        "--tls-key", "tests/data/key_pkcs8.pem",
+        "--tls-cert", "tests/fixtures/tls/cert.pem",
+        "--tls-key", "tests/fixtures/tls/key_pkcs8.pem",
 ]))]
 #[case(server(&[
-        "--tls-cert", "tests/data/cert.pem",
-        "--tls-key", "tests/data/key_pkcs1.pem",
+        "--tls-cert", "tests/fixtures/tls/cert.pem",
+        "--tls-key", "tests/fixtures/tls/key_pkcs1.pem",
 ]))]
 #[case(server(&[
-        "--tls-cert", "tests/data/cert_ecdsa.pem",
-        "--tls-key", "tests/data/key_ecdsa.pem",
+        "--tls-cert", "tests/fixtures/tls/cert_ecdsa.pem",
+        "--tls-key", "tests/fixtures/tls/key_ecdsa.pem",
 ]))]
 fn tls_works(#[case] server: TestServer) -> Result<(), Error> {
     let client = ClientBuilder::new()
@@ -50,8 +50,8 @@ fn direct_tls_prefers_http2_via_alpn() -> Result<(), Error> {
     let secrets = tmpdir();
     let certificate = secrets.path().join("cert.pem");
     let private_key = secrets.path().join("key.pem");
-    std::fs::copy("tests/data/cert.pem", &certificate)?;
-    std::fs::copy("tests/data/key_pkcs8.pem", &private_key)?;
+    std::fs::copy("tests/fixtures/tls/cert.pem", &certificate)?;
+    std::fs::copy("tests/fixtures/tls/key_pkcs8.pem", &private_key)?;
     std::fs::set_permissions(&private_key, std::fs::Permissions::from_mode(0o600))?;
     let listen_port = port();
     let mut command = ram_command(root.path(), listen_port);
@@ -83,9 +83,9 @@ fn direct_tls_prefers_http2_via_alpn() -> Result<(), Error> {
 fn direct_tls_can_enable_hsts(
     #[with(&[
         "--tls-cert",
-        "tests/data/cert.pem",
+        "tests/fixtures/tls/cert.pem",
         "--tls-key",
-        "tests/data/key_pkcs8.pem",
+        "tests/fixtures/tls/key_pkcs8.pem",
         "--hsts-max-age",
         "31536000",
     ])]
@@ -107,7 +107,7 @@ fn stalled_tls_handshake_is_bounded_by_lifetime_from_accept() -> Result<(), Erro
     let root = fixtures::tmpdir();
     let secrets = tmpdir();
     let private_key = secrets.path().join("key.pem");
-    std::fs::copy("tests/data/key_pkcs8.pem", &private_key)?;
+    std::fs::copy("tests/fixtures/tls/key_pkcs8.pem", &private_key)?;
     std::fs::set_permissions(&private_key, std::fs::Permissions::from_mode(0o600))?;
     let listen_port = port();
     let mut command = ram_command(root.path(), listen_port);
@@ -116,7 +116,7 @@ fn stalled_tls_handshake_is_bounded_by_lifetime_from_accept() -> Result<(), Erro
             "--auth",
             TEST_AUTH_RULE,
             "--tls-cert",
-            "tests/data/cert.pem",
+            "tests/fixtures/tls/cert.pem",
             "--tls-key",
         ])
         .arg(&private_key)
@@ -148,7 +148,7 @@ fn stalled_tls_handshake_is_bounded_by_lifetime_from_accept() -> Result<(), Erro
 fn hsts_without_direct_tls_is_rejected() -> Result<(), Error> {
     let port = port().to_string();
     assert_cmd::cargo::cargo_bin_cmd!("ram")
-        .env("RAM_NO_CONFIG", "1")
+        .env_remove("RAM_CONFIG")
         .args([
             "--auth",
             TEST_AUTH_RULE,
@@ -168,14 +168,14 @@ fn hsts_without_direct_tls_is_rejected() -> Result<(), Error> {
 fn wrong_path_cert() -> Result<(), Error> {
     let port = port().to_string();
     assert_cmd::cargo::cargo_bin_cmd!("ram")
-        .env("RAM_NO_CONFIG", "1")
+        .env_remove("RAM_CONFIG")
         .args([
             "--auth",
             TEST_AUTH_RULE,
             "--tls-cert",
             "wrong",
             "--tls-key",
-            "tests/data/key.pem",
+            "tests/fixtures/tls/key.pem",
             "--port",
             &port,
         ])
@@ -191,12 +191,12 @@ fn wrong_path_cert() -> Result<(), Error> {
 fn wrong_path_key() -> Result<(), Error> {
     let port = port().to_string();
     assert_cmd::cargo::cargo_bin_cmd!("ram")
-        .env("RAM_NO_CONFIG", "1")
+        .env_remove("RAM_CONFIG")
         .args([
             "--auth",
             TEST_AUTH_RULE,
             "--tls-cert",
-            "tests/data/cert.pem",
+            "tests/fixtures/tls/cert.pem",
             "--tls-key",
             "wrong",
             "--port",

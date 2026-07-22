@@ -13,19 +13,19 @@
 <body>
   <main>
     <h1>Ram 第三方许可证 / <span lang="en">Ram third-party licenses</span></h1>
-    <p>本报告由发布可执行文件的 Rust 锁定依赖图生成。<br>
-      <span lang="en">This report is generated from the locked Rust dependency graph for the released executable.</span>
+    <p>本报告由 x86-64 与 ARM64 Linux 发布目标的 Rust 锁定普通/构建依赖并集生成。<br>
+      <span lang="en">This report is generated from the union of locked normal/build dependencies for the x86-64 and ARM64 Linux release targets.</span>
     </p>
     <h2>许可证概览 / <span lang="en">License overview</span></h2>
     <ul>
       {{#each overview}}
-      <li><a href="#{{id}}">{{name}}</a> ({{count}})</li>
+      <li>{{name}} ({{count}})</li>
       {{/each}}
     </ul>
     <h2>许可证正文 / <span lang="en">License texts</span></h2>
     {{#each licenses}}
     <section>
-      <h3 id="{{id}}">{{name}}</h3>
+      <h3 data-spdx-id="{{id}}">{{name}}</h3>
       <p>使用方 / <span lang="en">Used by:</span></p>
       <ul>
         {{#each used_by}}

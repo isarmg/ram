@@ -2,9 +2,10 @@
   "name": "ram-fileserver-webui",
   "version": "0.47.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "engines": {
-    "node": ">=24"
+    "node": ">=24.18.0"
   },
   "scripts": {
     "lint": "eslint --max-warnings 0 web scripts tests/frontend tests/e2e eslint.config.js playwright.config.js vitest.config.js",
@@ -18,7 +19,7 @@
   "devDependencies": {
     "@axe-core/playwright": "4.12.1",
     "@playwright/test": "1.61.1",
-    "@types/node": "26.1.1",
+    "@types/node": "24.13.3",
     "@vitest/coverage-v8": "4.1.10",
     "eslint": "10.7.0",
     "globals": "17.7.0",

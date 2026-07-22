@@ -67,7 +67,9 @@ label is an operator assertion that the machine provides:
   no overcommit, and enough local disk space and RAM for the fixture;
 - a local filesystem with stable mount options under `RUNNER_TEMP` (not NFS,
   FUSE, overlay-on-shared-storage, or a network home directory);
-- Rust 1.96.0, curl with HTTP/2, and nghttp2 `h2load` with `--h1`,
+- GitHub Actions Runner 2.336.0, keeping the Node 24 action runtime above its
+  hard minimum and within GitHub's supported update window;
+- Rust 1.97.1, curl with HTTP/2, and nghttp2 `h2load` with `--h1`,
   `--alpn-list`, and `--max-concurrent-streams` support;
 - no concurrent benchmark job. Workflow concurrency serializes repository
   runs, while machine ownership prevents unrelated runner noise.
@@ -194,7 +196,8 @@ self-hosted, linux, x64, ram-benchmark
 runner 不与构建/应用任务共享。`ram-benchmark` 标签表示运维人员保证：至少 8 个在线逻辑 CPU，
 2-5 专用于 Ram、6-7 专用于 curl/h2load；这些 CPU 使用 performance governor，固件/SMT/NUMA
 稳定且无超售；`RUNNER_TEMP` 位于空间与内存充足的稳定本地文件系统，而非 NFS/FUSE/共享
-overlay/网络 home；工具为 Rust 1.96.0、支持 HTTP/2 的 curl，以及支持 `--h1`、`--alpn-list`、
+overlay/网络 home；GitHub Actions Runner 固定为 2.336.0，使 Node 24 action runtime 高于硬性
+最低版本并处于 GitHub 支持的更新窗口；工具为 Rust 1.97.1、支持 HTTP/2 的 curl，以及支持 `--h1`、`--alpn-list`、
 `--max-concurrent-streams` 的 nghttp2 h2load；机器上无并发基准任务。
 
 管理员逐项验证并设置 `RAM_BENCHMARK_ENABLED=true` 前，定时任务保持禁用，不会永久排队等待

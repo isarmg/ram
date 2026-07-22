@@ -7,9 +7,9 @@ ignore = []
 
 [licenses]
 confidence-threshold = 0.8
-# 这是获准 Rust 依赖许可证的唯一事实来源。scripts/check-license-policy.py 要求 cargo-about
+# Ram 项目自身仅使用 MIT；这是获准第三方 Rust 依赖许可证的唯一事实来源。scripts/check-license-policy.py 要求 cargo-about
 # 优先级列表是此列表精确且有序的镜像。
-# This is the single source of truth for accepted Rust dependency licenses.
+# Ram itself is MIT-only. This is the single source of truth for accepted third-party Rust dependency licenses.
 # scripts/check-license-policy.py requires cargo-about's list to be an exact ordered mirror.
 #
 # MIT-0 是带明确担保免责声明且无需署名的标准宽松许可证，故予接受。Unlicense 的公有领域
@@ -47,6 +47,12 @@ skip = [
     { crate = "getrandom@0.2.17", reason = "digest_auth test feature unification activates 0.2; release normal/build graphs exclude it" },
     { crate = "password-hash@0.5.0", reason = "latest stable argon2 0.5.3 still requires password-hash 0.5 while sha-crypt uses 0.6" },
     { crate = "rand_core@0.6.4", reason = "argon2 0.5.3 still reaches rand_core 0.6 while uuid fast-rng uses rand_core 0.10" },
+    # serde_derive 1.0.229 已采用 syn 3；Tokio/Futures/ICU/rstest/smart-default 的最新稳定版
+    # 仍使用 syn 2。两者都只在编译期执行，精确版本例外会在任一侧再次升级时强制复核。
+    # serde_derive 1.0.229 has adopted syn 3, while the latest stable
+    # Tokio/Futures/ICU/rstest/smart-default releases still use syn 2. Both are compile-time-only;
+    # this exact exception forces another review when either side moves again.
+    { crate = "syn@2.0.119", reason = "latest stable macro ecosystem has not yet converged with serde_derive on syn 3" },
 ]
 
 [sources]

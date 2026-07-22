@@ -21,9 +21,9 @@ opened file descriptors establish authority.
 | 职责 / Responsibility | 主要文件与入口 / Main files and entry points | 作用 / Role |
 |---|---|---|
 | 启动与运行时 / Startup and runtime | `src/main.rs::main`, `src/lib.rs::run`, `src/runtime/mod.rs::{run,run_async,serve}` | 配置加载、监听器、运行时、信号和排空 / Config, listeners, runtime, signals, drain |
-| 配置 / Configuration | `src/config/{mod,cli,schema,sources,validation,path_resolution}.rs` | 合并 CLI/env/YAML/默认值，校验资源与敏感路径 / Merge inputs and validate budgets/sensitive paths |
-| 路径身份 / Path identity | `src/path_identity.rs`, `src/server/filesystem.rs::RootFs` | 通过描述符和 `openat2` 固定对象 / Pin objects with descriptors and `openat2` |
-| 来源身份 / Source identity | `src/source_identity.rs` | 固定内核对端，并只接受可信代理提供的严格来源细化 / Pin the kernel peer and accept strict source refinement only from trusted proxies |
+| 配置 / Configuration | `src/config/{mod,cli,schema,sources,validation,path_resolution}.rs` | 合并 CLI/env/显式 YAML/默认值，校验资源与敏感路径 / Merge CLI/env/explicit YAML/defaults and validate budgets/sensitive paths |
+| 路径身份 / Path identity | `src/identity/path.rs`, `src/server/filesystem/mod.rs::RootFs` | 通过描述符和 `openat2` 固定对象 / Pin objects with descriptors and `openat2` |
+| 来源身份 / Source identity | `src/identity/source.rs` | 固定内核对端，并只接受可信代理提供的严格来源细化 / Pin the kernel peer and accept strict source refinement only from trusted proxies |
 | 服务状态 / Server state | `src/server/state.rs::Server::init` | 构造根能力、信号量、清理器与代理策略 / Build root capabilities, limits, cleanup, proxy policy |
 | HTTP 边界 / HTTP boundary | `src/server/authentication.rs::Server::call` | 请求准入、来源身份、错误、安全头与日志 / Admission, source identity, errors, headers, logging |
 | 路由 / Routing | `src/server/router.rs::Server::handle` | 规范化、认证、二次 ACL、能力计算与分派 / Normalize, authenticate, re-authorize, compute capabilities, dispatch |
@@ -31,9 +31,9 @@ opened file descriptors establish authority.
 | 方法模型 / Method model | `src/http/methods.rs`, `src/server/capabilities.rs` | `Allow`/OPTIONS/405/CORS 的唯一策略源 / Single policy source for `Allow`, OPTIONS, 405, CORS |
 | 请求状态与前置条件 / Request state and preconditions | `src/server/{request_context,preconditions}.rs` | 认证后的类型状态、条件头单次解析与统一求值 / Post-auth typed state, one conditional-header parse, unified evaluation |
 | 读取 / Reads | `src/server/{read_routes,content,browse,archive,range,walk}.rs` | 文件、列表、遍历、搜索、Range、编辑视图与 ZIP / Files, listings, traversal, search, Range, editor views, ZIP |
-| 写入 / Writes | `src/server/{write_routes,write}.rs` | PUT/PATCH/DELETE/MKCOL/COPY/MOVE 与原子提交 / Mutations and atomic commit |
+| 写入 / Writes | `src/server/write_routes.rs`, `src/server/write/mod.rs` | PUT/PATCH/DELETE/MKCOL/COPY/MOVE 与原子提交 / Mutations and atomic commit |
 | 列表变更版本 / Listing mutation versions | `src/server/mutation_version.rs`, `src/server/browse.rs`, `web/{ui-state,file-operations,api}.js` | 稳定扫描签名与列表来源 DELETE/MOVE 的 412 防护 / Stable-scan signing and 412 protection for listing-originated DELETE/MOVE |
-| WebDAV | `src/server/{dav_routes,webdav}.rs` | 有界 DAV XML 与子集语义 / Bounded DAV XML and documented subset |
+| WebDAV | `src/server/dav_routes.rs`, `src/server/webdav/mod.rs` | 有界 DAV XML 与子集语义 / Bounded DAV XML and documented subset |
 | 响应模型与辅助 / Response models and helpers | `src/server/{model,error,reply,security_headers}.rs` | 视图/DAV 模型、类型化错误、响应与出口安全策略 / View/DAV models, typed errors, replies, and egress security policy |
 | HTTP 正文与 I/O 看门狗 / HTTP bodies and I/O watchdogs | `src/http/{body,io_watchdog}.rs` | 有界帧流、响应终态、连接与单响应进度期限 / Bounded frame streams, response outcomes, connection and per-response progress deadlines |
 | 浏览器 UI / Browser UI | `web/{index,page-init,ui-state,file-operations,upload-scheduler,editor,api,app-utils,icons}.js` | 严格页面状态、上传、下载、编辑、预览与无副作用辅助 / Strict state, upload, download, edit, preview, and side-effect-free helpers |
@@ -50,7 +50,7 @@ flowchart TD
   C --> D{"内部配额 helper?<br/>Internal quota helper?"}
   D -- "是 / Yes" --> E["run_storage_quota_hook_helper<br/>执行固定钩子 / Exec pinned hook"]
   D -- "否 / No" --> F["build_cli + Args::parse"]
-  F --> G["合并 CLI > RAM_* env > YAML > defaults<br/>Merge configuration sources"]
+  F --> G["合并 CLI > RAM_* env > 显式 YAML > defaults<br/>Merge explicit configuration sources"]
   G --> H["逐项解析路径并捕获敏感输入<br/>Resolve paths and capture sensitive inputs incrementally"]
   H --> I["资源/跨字段校验、默认输出派生、输出能力捕获<br/>Interleaved limits/cross-field checks, output derivation, capability capture"]
   I --> I2["配置认证安全状态并保留启动能力<br/>Configure authentication security and retain startup capabilities"]
@@ -771,8 +771,8 @@ flowchart TD
 
 1. `src/server/mod.rs` 顶部概览和 `src/server/router.rs::handle` — 先建立请求全景。 / Build the request overview first.
 2. `src/auth/acl.rs` + `src/server/request_context.rs` — 理解逻辑 ACL 与 fd 二次授权。 / Understand logical ACL and fd re-authorization.
-3. `src/path_identity.rs` + `src/server/filesystem.rs` — 理解能力式路径安全。 / Understand capability-style path safety.
-4. `src/server/write.rs::{stage_upload,handle_upload}` 与 `TempFile::commit` — 跟踪原子写入。 / Trace atomic writes.
+3. `src/identity/path.rs` + `src/server/filesystem/mod.rs` — 理解能力式路径安全。 / Understand capability-style path safety.
+4. `src/server/write/mod.rs::{stage_upload,handle_upload}` 与 `TempFile::commit` — 跟踪原子写入。 / Trace atomic writes.
 5. `src/http/body.rs` + `src/http/io_watchdog.rs` — 理解流终态、permit 生命周期和超时。 / Learn stream terminal states, permit lifetime, and timeouts.
 6. `web/page-init.js` -> `web/ui-state.js` -> `web/file-operations.js` / `web/editor.js` -> `web/api.js` — 按真实启动顺序阅读前端。 / Read the frontend in actual boot order.
 7. `.github/workflows/release.yaml` 配合 `scripts/check-release-*.py` 和 `scripts/check-sbom.py` — 理解供应链闭环。 / Follow the supply-chain closure.

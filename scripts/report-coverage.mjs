@@ -17,18 +17,23 @@ const RUST_GROUPS = {
     // 防止文件移动伪装成覆盖率回退或提升。
     // English: This code lived in auth/mod.rs at baseline capture. Keep it in
     // the same trend group so a mechanical move cannot mimic a coverage change.
-    "src/auth/tests.rs",
+    "src/auth/test_suite/mod.rs",
   ],
   filesystem: [
-    "src/server/filesystem.rs",
-    "src/path_identity.rs",
-    "src/source_identity.rs",
+    "src/server/filesystem/mod.rs",
+    "src/server/filesystem/stale_upload_cleanup_tests.rs",
+    "src/server/filesystem/mutation_transaction_tests.rs",
+    "src/server/filesystem/root_identity_tests.rs",
+    "src/server/filesystem/blocking_admission_tests.rs",
+    "src/identity/path.rs",
+    "src/identity/source.rs",
   ],
   "write-preconditions": [
-    "src/server/write.rs",
+    "src/server/write/mod.rs",
+    "src/server/write/storage_tests.rs",
     "src/server/preconditions.rs",
   ],
-  webdav: ["src/server/webdav.rs"],
+  webdav: ["src/server/webdav/mod.rs", "src/server/webdav/tests.rs"],
   range: ["src/server/range.rs", "src/utils/mod.rs"],
 };
 
@@ -263,7 +268,7 @@ function parseArguments(argv) {
   const options = {
     rust: "coverage/rust-summary.json",
     frontend: "coverage/frontend/coverage-summary.json",
-    policy: ".github/coverage-baseline.json",
+    policy: "tests/coverage/policy.json",
     output: "coverage/summary.json",
     updateBaseline: false,
   };

@@ -45,7 +45,7 @@ fn digest_md5_compatibility_flag_is_rejected() -> Result<(), Error> {
     // MD5 Digest 支持已刻意移除；废弃的启用标志不得悄然恢复弱质询。
     // MD5 Digest support was removed; the obsolete opt-in flag must not re-enable a weaker challenge.
     Command::new(assert_cmd::cargo::cargo_bin!("ram"))
-        .env("RAM_NO_CONFIG", "1")
+        .env_remove("RAM_CONFIG")
         .arg("--digest-md5-compat")
         .assert()
         .failure()
@@ -58,7 +58,7 @@ fn digest_md5_compatibility_flag_is_rejected() -> Result<(), Error> {
 #[test]
 fn duplicate_auth_usernames_are_rejected() -> Result<(), Error> {
     Command::new(assert_cmd::cargo::cargo_bin!("ram"))
-        .env("RAM_NO_CONFIG", "1")
+        .env_remove("RAM_CONFIG")
         .args([
             "--auth",
             "user:first-secret@/:rw",
@@ -77,7 +77,7 @@ fn duplicate_auth_usernames_are_rejected() -> Result<(), Error> {
 fn password_hash_algorithms_and_blocking_pool_are_validated_at_startup() -> Result<(), Error> {
     let excessive = format!("user:$6$rounds=1000001$test-salt${SHA512_CRYPT_DIGEST}@/:rw");
     Command::new(assert_cmd::cargo::cargo_bin!("ram"))
-        .env("RAM_NO_CONFIG", "1")
+        .env_remove("RAM_CONFIG")
         .args(["--auth", &excessive])
         .assert()
         .failure()
@@ -86,7 +86,7 @@ fn password_hash_algorithms_and_blocking_pool_are_validated_at_startup() -> Resu
 
     let argon2id = "user:$argon2id$v=19$m=19456,t=2,p=1$YmFkIHNhbHQh$DqHGwv6NQV0VcaJi7jeF1E8IpfMXmXcpq4r2kKyqpXk@/:rw";
     Command::new(assert_cmd::cargo::cargo_bin!("ram"))
-        .env("RAM_NO_CONFIG", "1")
+        .env_remove("RAM_CONFIG")
         .args(["--auth", argon2id, "--max-blocking-threads", "4"])
         .assert()
         .failure()
@@ -97,7 +97,7 @@ fn password_hash_algorithms_and_blocking_pool_are_validated_at_startup() -> Resu
     for variant in ["argon2i", "argon2d"] {
         let unsupported = argon2id.replace("argon2id", variant);
         Command::new(assert_cmd::cargo::cargo_bin!("ram"))
-            .env("RAM_NO_CONFIG", "1")
+            .env_remove("RAM_CONFIG")
             .args(["--auth", &unsupported])
             .assert()
             .failure()
@@ -108,7 +108,7 @@ fn password_hash_algorithms_and_blocking_pool_are_validated_at_startup() -> Resu
     }
 
     Command::new(assert_cmd::cargo::cargo_bin!("ram"))
-        .env("RAM_NO_CONFIG", "1")
+        .env_remove("RAM_CONFIG")
         .args(["--auth", "plain:password@/:rw", "--auth", argon2id])
         .assert()
         .failure()
@@ -118,7 +118,7 @@ fn password_hash_algorithms_and_blocking_pool_are_validated_at_startup() -> Resu
 
     let bounded_pool_rule = format!("user:$6$test-salt${SHA512_CRYPT_DIGEST}@/:rw");
     Command::new(assert_cmd::cargo::cargo_bin!("ram"))
-        .env("RAM_NO_CONFIG", "1")
+        .env_remove("RAM_CONFIG")
         .args(["--auth", &bounded_pool_rule, "--max-blocking-threads", "4"])
         .assert()
         .failure()
@@ -479,7 +479,7 @@ fn anonymous_auth_rule_is_rejected() -> Result<(), Error> {
     let tmpdir = tmpdir();
     let port = port();
     Command::new(assert_cmd::cargo::cargo_bin!("ram"))
-        .env("RAM_NO_CONFIG", "1")
+        .env_remove("RAM_CONFIG")
         .arg(tmpdir.path())
         .arg("-p")
         .arg(port.to_string())

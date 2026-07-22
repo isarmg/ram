@@ -138,7 +138,7 @@ impl Server {
                 args.uri_prefix[0..args.uri_prefix.len() - 1].to_string(),
                 encode_uri(&format!(
                     "{}{}",
-                    &args.uri_prefix,
+                    args.uri_prefix,
                     get_file_name(&args.serve_path)
                 )),
             ]

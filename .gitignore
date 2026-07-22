@@ -1,6 +1,12 @@
 /target
 /node_modules
 /coverage
+/dist
+/verified-source
+/smoke-diagnostics
+/ram-fileserver-*.cdx.json
+/release-metadata/*
+!/release-metadata/README.md
 /*.profraw
 __pycache__/
 *.py[cod]

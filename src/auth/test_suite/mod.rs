@@ -2769,7 +2769,7 @@ fn replay_attempt(user: &str, nc: u32) -> DigestReplayAttempt {
         key: DigestReplayKey {
             nonce: [b'n'; 34],
             user: Arc::from(user),
-            cnonce: Arc::from([b'c']),
+            cnonce: Arc::from(*b"c"),
             nc,
         },
         expires_at: 100,

@@ -1,9 +1,10 @@
-//! 启动配置：命令行参数（clap）+ 可执行文件旁的 `config.yaml`（serde_yaml）
-//! 两个来源合并成一份 [`Args`]。
+//! 启动配置：命令行参数（clap）与显式选择的 YAML（serde_yaml）
+//! 合并成一份 [`Args`]。YAML 只会通过 `--config` 或 `RAM_CONFIG` 加载；
+//! 不会扫描进程工作目录或可执行文件所在目录。
 //!
-//! 合并规则：先加载配置文件作为基底，命令行参数逐项覆盖。
+//! 合并规则：若显式选择 YAML，先把它作为基底加载，再由命令行参数逐项覆盖。
 //! 环境变量（`RAM_*`）由 clap 的 `.env(...)` 声明自动接入，
-//! 优先级介于两者之间（命令行 > 环境变量 > 配置文件 > 默认值）。
+//! 优先级介于两者之间（命令行 > 环境变量 > 显式 YAML > 默认值）。
 //!
 //! ## 本模块的 Rust 知识点
 //! - **clap builder 风格**：`build_cli()` 手工声明每个参数的名称、
@@ -21,12 +22,13 @@
 //! - serve 根目录是 `/` 时打印醒目警告。
 //!
 //! ## English overview
-//! Startup configuration merges command-line arguments (clap) and executable-adjacent
-//! `config.yaml` (serde_yaml) into one [`Args`] value.
+//! Startup configuration merges command-line arguments (clap) and explicitly selected YAML
+//! (serde_yaml) into one [`Args`] value. YAML is loaded only through `--config` or `RAM_CONFIG`;
+//! neither the process working directory nor the executable directory is scanned.
 //!
-//! The configuration file is loaded as the base and command-line arguments override individual
-//! fields. `RAM_*` environment variables enter through clap `.env(...)` declarations, giving the
-//! precedence command line > environment > configuration file > defaults.
+//! When selected, YAML is loaded as the base and command-line arguments override individual fields.
+//! `RAM_*` environment variables enter through clap `.env(...)` declarations, giving the
+//! precedence command line > environment > explicitly selected YAML > defaults.
 //!
 //! ## Rust concepts in this module
 //! - **clap builder style**: `build_cli()` declares each argument name, short/long option, and value
@@ -62,19 +64,19 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use crate::auth::{AccessControl, TokenRevocationCapabilities};
+use crate::identity::{
+    ForwardedHeader, IpCidr, OutputPathIdentity, PathIdentity, ServedPathIdentity,
+    TrustedProxyPolicy,
+};
 use crate::logging::HttpLogger;
-use crate::path_identity::{OutputPathIdentity, PathIdentity, ServedPathIdentity};
-use crate::source_identity::{ForwardedHeader, IpCidr, TrustedProxyPolicy};
 use crate::utils::{encode_uri, is_ipv6_available, is_trusted_file_owner};
 
-const DEFAULT_CONFIG_FILE: &str = "config.yaml";
 const PRIVATE_CONFIG_MAX_BYTES: u64 = 4 * 1024 * 1024;
 const AUTH_FILE_MAX_BYTES: u64 = 1024 * 1024;
 const AUTH_FILE_MAX_LINES: usize = 4096;
 const AUTH_FILE_MAX_LINE_BYTES: usize = 16 * 1024;
 const TOKEN_SECRET_FILE_MAX_BYTES: u64 = 64 * 1024;
 const PATH_PREFIX_MAX_BYTES: usize = 1024;
-const LEGACY_AUTO_CONFIG_WARNING: &str = "automatic executable-adjacent config.yaml discovery is deprecated; use --config or RAM_CONFIG instead";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ParsePurpose {

@@ -61,10 +61,6 @@ def require_bilingual_documents() -> None:
         "CHANGELOG.md": ("# 变更记录", "# Changelog (English)"),
         "CONTRIBUTING.md": ("# 贡献指南", "# Contributing Guide"),
         "SECURITY.md": ("# 安全策略", "# Security Policy"),
-        "todlist.md": (
-            "# Ram 项目整改与优化 To-Do List",
-            "# Ram Remediation and Optimization To-Do List",
-        ),
         "docs/THREAT_MODEL.md": ("# 部署威胁模型", "# Deployment Threat Model"),
         "docs/REPOSITORY_GOVERNANCE.md": (
             "# 仓库治理与发布保护检查表",
@@ -73,6 +69,14 @@ def require_bilingual_documents() -> None:
         "docs/CODE_FLOW.md": (
             "# 代码工作流程与模块作用",
             "# Code Flow and Module Responsibilities (English)",
+        ),
+        "docs/PROJECT_STRUCTURE.md": (
+            "# 项目文件结构",
+            "# Project Structure (English)",
+        ),
+        "release-metadata/README.md": (
+            "# 发布供应链元数据",
+            "# Release supply-chain metadata",
         ),
         "benchmarks/README.md": ("# Ram 性能基线", "# Ram performance baseline"),
         "benchmarks/baselines/README.md": ("# 已批准基线", "# Approved baselines"),
@@ -101,14 +105,18 @@ def check() -> None:
         "/src/auth/",
         "/src/config/",
         "/src/http/",
+        "/src/identity/",
         "/src/runtime/",
         "/src/server/",
-        "/src/path_identity.rs",
-        "/src/source_identity.rs",
         "/fuzz/",
         "/.github/workflows/",
         "/.github/actionlint.yaml",
+        "/LICENSE",
+        "/about.toml",
+        "/about.hbs",
+        "/scripts/check-license-policy.py",
         "/scripts/check-license-report.py",
+        "/scripts/check-fuzz-layout.py",
         "/scripts/check-release-manifest.py",
         "/scripts/check-release-archive.py",
         "/scripts/check-release-assets.py",
@@ -184,6 +192,8 @@ def check() -> None:
         package_include = cargo_package["include"]
     if "/docs/CODE_FLOW.md" not in package_include:
         raise ValueError("Cargo.toml package.include must contain /docs/CODE_FLOW.md")
+    if "/docs/PROJECT_STRUCTURE.md" not in package_include:
+        raise ValueError("Cargo.toml package.include must contain /docs/PROJECT_STRUCTURE.md")
     if cargo_package.get("publish") != ["crates-io"]:
         raise ValueError("Cargo.toml package.publish must be exactly ['crates-io']")
     changelog = read("CHANGELOG.md")
@@ -208,6 +218,9 @@ def check() -> None:
             "scripts/check-sbom.py verify-spdx",
             "scripts/check-license-report.py verify",
             "cargo cyclonedx --all-features",
+            "--target x86_64-unknown-linux-gnu --target aarch64-unknown-linux-gnu",
+            'mv "$output.json" "release-metadata/$output.json"',
+            "release-metadata/ram-fileserver-*.cdx.json",
             "environment: release",
             "Preflight the crates.io version",
             "scripts/check-release-state.py crate-checksum",
@@ -254,6 +267,8 @@ def check() -> None:
             "scripts/check-release-assets.py self-test",
             "scripts/check-release-state.py self-test",
             "scripts/check-sbom.py self-test",
+            "scripts/check-fuzz-layout.py",
+            "--target x86_64-unknown-linux-gnu --target aarch64-unknown-linux-gnu",
         ),
     )
 
@@ -263,6 +278,7 @@ def check() -> None:
         archive_checker,
         (
             '"docs/CODE_FLOW.md"',
+            '"docs/PROJECT_STRUCTURE.md"',
             "MAX_EXPANDED_ARCHIVE_BYTES",
             "BoundedExpandedReader",
             'mode="r|"',
@@ -341,8 +357,11 @@ def check() -> None:
         license_report_checker,
         (
             'os.environ.get("CARGO", "cargo")',
-            'project, "normal,build"',
-            'project, "normal,build,dev"',
+            "RELEASE_TARGETS = (",
+            '"x86_64-unknown-linux-gnu"',
+            '"aarch64-unknown-linux-gnu"',
+            '"normal,build"',
+            '"normal,build,dev"',
             "license report has no license sections",
             "has no license text",
             "contains development-only packages",

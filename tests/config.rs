@@ -8,9 +8,7 @@ mod utils;
 use assert_cmd::prelude::*;
 use assert_fs::TempDir;
 use digest_auth_util::send_with_digest_auth;
-use fixtures::{
-    Error, ServerProc, TEST_AUTH_RULE, command_output_with_exec_retry, port, ram_command, tmpdir,
-};
+use fixtures::{Error, ServerProc, TEST_AUTH_RULE, port, ram_command, tmpdir};
 use rstest::rstest;
 use std::fs;
 use std::net::TcpListener;
@@ -22,7 +20,7 @@ use std::thread;
 use std::time::Duration;
 
 #[rstest]
-fn use_config_file(tmpdir: TempDir, port: u16) -> Result<(), Error> {
+fn explicit_config_file_is_loaded(tmpdir: TempDir, port: u16) -> Result<(), Error> {
     let bindir = TempDir::new()?;
     let bin_path = bindir.path().join("ram");
     fs::copy(assert_cmd::cargo::cargo_bin!("ram"), &bin_path)?;
@@ -34,10 +32,15 @@ fn use_config_file(tmpdir: TempDir, port: u16) -> Result<(), Error> {
         permissions.set_mode(0o755);
         fs::set_permissions(&bin_path, permissions)?;
     }
-    fs::copy(get_config_path(), bindir.path().join("config.yaml"))?;
+    let config_path = bindir.path().join("config.yaml");
+    fs::copy(get_config_path(), &config_path)?;
 
     let mut cmd = Command::new(&bin_path);
-    cmd.arg(tmpdir.path()).arg("-p").arg(port.to_string());
+    cmd.arg(tmpdir.path())
+        .arg("--config")
+        .arg(&config_path)
+        .arg("-p")
+        .arg(port.to_string());
     let _server = ServerProc::spawn(cmd);
 
     let url = format!("http://localhost:{port}/ram/index.html");
@@ -62,7 +65,10 @@ fn use_config_file(tmpdir: TempDir, port: u16) -> Result<(), Error> {
 }
 
 #[rstest]
-fn no_config_env_disables_config_file(tmpdir: TempDir, port: u16) -> Result<(), Error> {
+fn executable_and_cwd_config_is_ignored_without_selector(
+    tmpdir: TempDir,
+    port: u16,
+) -> Result<(), Error> {
     let bindir = TempDir::new()?;
     let bin_path = bindir.path().join("ram");
     fs::copy(assert_cmd::cargo::cargo_bin!("ram"), &bin_path)?;
@@ -74,20 +80,22 @@ fn no_config_env_disables_config_file(tmpdir: TempDir, port: u16) -> Result<(), 
         permissions.set_mode(0o755);
         fs::set_permissions(&bin_path, permissions)?;
     }
-    // 二进制旁虽有 config.yaml，RAM_NO_CONFIG 必须令 ram 完全忽略它，因此不应用配置的
-    // `path-prefix: ram`，改由 CLI `--auth` 生效。
-    // A nearby config.yaml must be ignored under RAM_NO_CONFIG, leaving its path-prefix unapplied and CLI auth effective.
+    // 把 cwd 也设为二进制目录，使同一 config.yaml 同时位于两个曾可能被误认为会隐式
+    // 搜索的位置。未显式选择时它必须被忽略，由 CLI `--auth` 生效。
+    // Use the executable directory as cwd so the same config.yaml occupies both locations that
+    // could otherwise be mistaken for implicit search roots. It must remain ignored without a selector.
     fs::copy(get_config_path(), bindir.path().join("config.yaml"))?;
 
     let mut cmd = Command::new(&bin_path);
-    cmd.env("RAM_NO_CONFIG", "1")
+    cmd.current_dir(bindir.path())
+        .env_remove("RAM_CONFIG")
         .arg(tmpdir.path())
         .arg("-p")
         .arg(port.to_string())
         .args(["--auth", "cli:cli@/:rw"]);
     let _server = ServerProc::spawn(cmd);
 
-    // 忽略配置 path-prefix，直接服务根。 / Config path-prefix is ignored; serve root directly.
+    // 忽略相邻配置的 path-prefix，直接服务根。 / Ignore the adjacent path-prefix and serve root directly.
     let url = format!("http://localhost:{port}/index.html");
     let resp = send_with_digest_auth(fetch!(b"GET", &url), "cli", "cli")?;
     assert_eq!(resp.status(), 200);
@@ -507,8 +515,7 @@ fn explicit_config_and_boolean_source_matrix(tmpdir: TempDir, port: u16) -> Resu
         )?;
 
         let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ram"));
-        cmd.env("RAM_NO_CONFIG", "1")
-            .arg("--config")
+        cmd.arg("--config")
             .arg(&config)
             .args(case.cli)
             .args(["--max-webdav-properties", "65"])
@@ -532,7 +539,7 @@ fn explicit_config_and_boolean_source_matrix(tmpdir: TempDir, port: u16) -> Resu
 #[rstest]
 #[case(false)]
 #[case(true)]
-fn explicit_config_uses_cwd_and_is_not_disabled_by_ram_no_config(
+fn explicit_config_path_uses_process_cwd(
     tmpdir: TempDir,
     port: u16,
     #[case] use_environment: bool,
@@ -546,7 +553,6 @@ fn explicit_config_uses_cwd_and_is_not_disabled_by_ram_no_config(
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ram"));
     cmd.current_dir(state.path())
-        .env("RAM_NO_CONFIG", "1")
         .args(["--max-webdav-properties", "65", "-p"])
         .arg(port.to_string());
     if use_environment {
@@ -595,7 +601,6 @@ fn auth_file_cli_is_safe_bounded_and_exclusive(tmpdir: TempDir, port: u16) -> Re
     )?;
     let mut mixed = Command::new(assert_cmd::cargo::cargo_bin!("ram"));
     mixed
-        .env("RAM_NO_CONFIG", "1")
         .arg("--config")
         .arg(config)
         .arg("--auth-file")
@@ -635,8 +640,7 @@ fn relative_sensitive_outputs_use_yaml_directory_and_cli_cwd(port: u16) -> Resul
     )?;
     fs::set_permissions(&config, fs::Permissions::from_mode(0o600))?;
     let mut yaml = Command::new(assert_cmd::cargo::cargo_bin!("ram"));
-    yaml.env("RAM_NO_CONFIG", "1")
-        .arg("--config")
+    yaml.arg("--config")
         .arg(&config)
         .arg("-p")
         .arg(port.to_string());
@@ -674,7 +678,6 @@ fn relative_yaml_socket_uses_config_directory_in_a_mixed_bind_set(port: u16) -> 
     let process_cwd = TempDir::new()?;
     let mut command = Command::new(assert_cmd::cargo::cargo_bin!("ram"));
     command
-        .env("RAM_NO_CONFIG", "1")
         .current_dir(process_cwd.path())
         .arg("--config")
         .arg(&config)
@@ -711,7 +714,6 @@ fn cli_mixed_bind_overrides_yaml_and_uses_process_cwd(port: u16) -> Result<(), E
     let process_cwd = TempDir::new()?;
     let mut command = Command::new(assert_cmd::cargo::cargo_bin!("ram"));
     command
-        .env("RAM_NO_CONFIG", "1")
         .current_dir(process_cwd.path())
         .arg("--config")
         .arg(&config)
@@ -810,7 +812,7 @@ fn check_config_is_successful_and_has_no_runtime_side_effects() -> Result<(), Er
     let occupied = TcpListener::bind(("127.0.0.1", 0))?;
     let occupied_port = occupied.local_addr()?.port();
     let output = Command::new(assert_cmd::cargo::cargo_bin!("ram"))
-        .env("RAM_NO_CONFIG", "0")
+        .env_remove("RAM_CONFIG")
         .arg("--check-config")
         .arg(&served)
         .arg("--bind")
@@ -887,7 +889,6 @@ fn check_config_counts_the_automatically_derived_persistent_revocation_backend()
     // backend before the blocking-pool minimum is computed; the former ordering incorrectly accepted 1.
     write_config(1)?;
     Command::new(assert_cmd::cargo::cargo_bin!("ram"))
-        .env("RAM_NO_CONFIG", "1")
         .args(["--check-config", "--config"])
         .arg(&config)
         .assert()
@@ -904,7 +905,6 @@ fn check_config_counts_the_automatically_derived_persistent_revocation_backend()
     // while CheckConfig remains side-effect free.
     write_config(5)?;
     Command::new(assert_cmd::cargo::cargo_bin!("ram"))
-        .env("RAM_NO_CONFIG", "1")
         .args(["--check-config", "--config"])
         .arg(&config)
         .assert()
@@ -930,7 +930,6 @@ fn check_config_rejects_invalid_configuration_and_honors_source_priority() -> Re
     )?;
 
     let accepted = Command::new(assert_cmd::cargo::cargo_bin!("ram"))
-        .env("RAM_NO_CONFIG", "1")
         .env("RAM_ALLOW_INSECURE_HTTP", "true")
         .args(["--check-config", "--config"])
         .arg(&config)
@@ -939,7 +938,6 @@ fn check_config_rejects_invalid_configuration_and_honors_source_priority() -> Re
     assert_eq!(accepted.stdout, b"Configuration OK\n");
 
     Command::new(assert_cmd::cargo::cargo_bin!("ram"))
-        .env("RAM_NO_CONFIG", "1")
         .env("RAM_ALLOW_INSECURE_HTTP", "true")
         .args(["--check-config", "--config"])
         .arg(&config)
@@ -950,82 +948,12 @@ fn check_config_rejects_invalid_configuration_and_honors_source_priority() -> Re
 
     fs::write(&config, "definitely-not-a-setting: true\n")?;
     Command::new(assert_cmd::cargo::cargo_bin!("ram"))
-        .env("RAM_NO_CONFIG", "1")
         .args(["--check-config", "--config"])
         .arg(&config)
         .assert()
         .failure()
         .stdout(predicates::str::is_empty())
         .stderr(predicates::str::contains("unknown field"));
-    Ok(())
-}
-
-#[test]
-fn legacy_auto_config_warning_is_exactly_scoped_to_actual_discovery() -> Result<(), Error> {
-    const WARNING: &str = "automatic executable-adjacent config.yaml discovery is deprecated";
-    let bindir = TempDir::new()?;
-    let bin_path = bindir.path().join("ram");
-    fs::copy(assert_cmd::cargo::cargo_bin!("ram"), &bin_path)?;
-    fs::set_permissions(&bin_path, fs::Permissions::from_mode(0o755))?;
-    let served = bindir.path().join("served");
-    fs::create_dir(&served)?;
-    let adjacent = bindir.path().join("config.yaml");
-    fs::write(
-        &adjacent,
-        format!(
-            "serve-path: '{}'\nauth:\n  - admin:password@/:rw\n",
-            served.display()
-        ),
-    )?;
-
-    let mut command = Command::new(&bin_path);
-    command
-        .env_remove("RAM_CONFIG")
-        .env_remove("RAM_NO_CONFIG")
-        .arg("--check-config");
-    let automatic = command_output_with_exec_retry(&mut command)?;
-    assert!(automatic.status.success());
-    assert_eq!(automatic.stdout, b"Configuration OK\n");
-    let stderr = String::from_utf8(automatic.stderr)?;
-    assert_eq!(stderr.matches(WARNING).count(), 1);
-
-    let explicit = bindir.path().join("explicit.yaml");
-    fs::write(
-        &explicit,
-        format!(
-            "serve-path: '{}'\nauth:\n  - explicit:password@/:rw\n",
-            served.display()
-        ),
-    )?;
-    fs::write(&adjacent, "unknown-adjacent-setting: true\n")?;
-    for use_environment in [false, true] {
-        let mut command = Command::new(&bin_path);
-        command
-            .env_remove("RAM_CONFIG")
-            .env_remove("RAM_NO_CONFIG")
-            .arg("--check-config");
-        if use_environment {
-            command.env("RAM_CONFIG", &explicit);
-        } else {
-            command.arg("--config").arg(&explicit);
-        }
-        let output = command_output_with_exec_retry(&mut command)?;
-        assert!(output.status.success());
-        assert!(!String::from_utf8_lossy(&output.stderr).contains(WARNING));
-    }
-
-    for value in ["", "0", "false"] {
-        let mut command = Command::new(&bin_path);
-        command
-            .env_remove("RAM_CONFIG")
-            .env("RAM_NO_CONFIG", value)
-            .arg("--check-config")
-            .arg(&served)
-            .args(["--auth", "disabled:password@/:rw"]);
-        let disabled = command_output_with_exec_retry(&mut command)?;
-        assert!(disabled.status.success(), "RAM_NO_CONFIG={value:?}");
-        assert!(!String::from_utf8_lossy(&disabled.stderr).contains(WARNING));
-    }
     Ok(())
 }
 
@@ -1042,7 +970,7 @@ fn check_config_reads_existing_revocation_state_without_creating_lock() -> Resul
     let lock = state.path().join("revocations.json.lock");
 
     Command::new(assert_cmd::cargo::cargo_bin!("ram"))
-        .env("RAM_NO_CONFIG", "1")
+        .env_remove("RAM_CONFIG")
         .arg("--check-config")
         .arg(&served)
         .args(["--auth", TEST_AUTH_RULE])
@@ -1089,7 +1017,7 @@ fn check_config_requires_existing_revocation_lock_to_be_read_write_capable() -> 
         command.uid(UNPRIVILEGED_UID).gid(UNPRIVILEGED_UID);
     }
     command
-        .env("RAM_NO_CONFIG", "1")
+        .env_remove("RAM_CONFIG")
         .arg("--check-config")
         .arg(&served)
         .args(["--auth", TEST_AUTH_RULE])
@@ -1119,7 +1047,7 @@ fn check_config_validates_custom_asset_metadata_and_contents() -> Result<(), Err
     let command = || {
         let mut command = Command::new(assert_cmd::cargo::cargo_bin!("ram"));
         command
-            .env("RAM_NO_CONFIG", "1")
+            .env_remove("RAM_CONFIG")
             .arg("--check-config")
             .arg(&served)
             .args(["--auth", TEST_AUTH_RULE])
@@ -1153,7 +1081,7 @@ fn check_config_validates_existing_log_without_creating_or_chmodding() -> Result
     let command = |log: &std::path::Path| {
         let mut command = Command::new(assert_cmd::cargo::cargo_bin!("ram"));
         command
-            .env("RAM_NO_CONFIG", "1")
+            .env_remove("RAM_CONFIG")
             .arg("--check-config")
             .arg(&served)
             .args(["--auth", TEST_AUTH_RULE])
@@ -1224,7 +1152,7 @@ fn check_config_validates_unix_socket_paths_without_touching_them() -> Result<()
     let command = |socket: &std::path::Path| {
         let mut command = Command::new(assert_cmd::cargo::cargo_bin!("ram"));
         command
-            .env("RAM_NO_CONFIG", "1")
+            .env_remove("RAM_CONFIG")
             .arg("--check-config")
             .arg(&served)
             .args(["--auth", TEST_AUTH_RULE, "--bind"])
@@ -1237,7 +1165,7 @@ fn check_config_validates_unix_socket_paths_without_touching_them() -> Result<()
     assert!(!missing.exists());
 
     Command::new(assert_cmd::cargo::cargo_bin!("ram"))
-        .env("RAM_NO_CONFIG", "1")
+        .env_remove("RAM_CONFIG")
         .arg("--check-config")
         .arg(&served)
         .args([
@@ -1288,15 +1216,15 @@ fn check_config_validates_tls_certificate_key_and_pairing() -> Result<(), Error>
     fs::create_dir(&served)?;
     let cert = state.path().join("cert.pem");
     let key = state.path().join("key.pem");
-    fs::copy("tests/data/cert.pem", &cert)?;
-    fs::copy("tests/data/key_pkcs8.pem", &key)?;
+    fs::copy("tests/fixtures/tls/cert.pem", &cert)?;
+    fs::copy("tests/fixtures/tls/key_pkcs8.pem", &key)?;
     fs::set_permissions(&cert, fs::Permissions::from_mode(0o600))?;
     fs::set_permissions(&key, fs::Permissions::from_mode(0o600))?;
 
     let command = |cert: &std::path::Path, key: &std::path::Path| {
         let mut command = Command::new(assert_cmd::cargo::cargo_bin!("ram"));
         command
-            .env("RAM_NO_CONFIG", "1")
+            .env_remove("RAM_CONFIG")
             .arg("--check-config")
             .arg(&served)
             .args(["--auth", TEST_AUTH_RULE])
@@ -1322,18 +1250,14 @@ fn check_config_validates_tls_certificate_key_and_pairing() -> Result<(), Error>
     command(&cert, &invalid_key).assert().failure();
 
     let mismatched_key = state.path().join("mismatched-key.pem");
-    fs::copy("tests/data/key_ecdsa.pem", &mismatched_key)?;
+    fs::copy("tests/fixtures/tls/key_ecdsa.pem", &mismatched_key)?;
     fs::set_permissions(&mismatched_key, fs::Permissions::from_mode(0o600))?;
     command(&cert, &mismatched_key).assert().failure();
     Ok(())
 }
 
 fn get_config_path() -> PathBuf {
-    let mut path = std::env::current_dir().expect("Failed to get current directory");
-    path.push("tests");
-    path.push("data");
-    path.push("config.yaml");
-    path
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/config.yaml")
 }
 
 fn write_test_secret(path: &std::path::Path) -> Result<(), Error> {

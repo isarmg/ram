@@ -28,7 +28,7 @@ const PEER_HELPER_MARKER_ENV: &str = "RAM_BIND_TEST_PEER_MARKER";
 #[case(&["-b", "20.205.243.166"])]
 fn bind_fails(tmpdir: TempDir, port: u16, #[case] args: &[&str]) -> Result<(), Error> {
     Command::new(assert_cmd::cargo::cargo_bin!("ram"))
-        .env("RAM_NO_CONFIG", "1")
+        .env_remove("RAM_CONFIG")
         .arg(tmpdir.path())
         .arg("-p")
         .arg(port.to_string())

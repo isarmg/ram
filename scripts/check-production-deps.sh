@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# 从任意调用目录绑定到本脚本所属仓库，避免误查相邻 Cargo 项目。
+# Bind to this script's repository from any caller directory so an adjacent Cargo project cannot be checked by mistake.
+script_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
+cd -- "$repo_root"
+
 # 让仅测试参考客户端远离所有受支持生产依赖图。`cargo tree` 检查目标时不需要其 Rust 标准库，
 # 因此单个 CI runner 就能覆盖两种发布架构。
 # Keep test-only reference clients out of every supported production graph. `cargo tree` does not need

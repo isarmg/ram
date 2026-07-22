@@ -3,11 +3,13 @@
 //! Ram 文件服务的库入口。
 //!
 //! 具体实现按职责拆分到认证、配置、HTTP、日志、运行时和服务器模块；
-//! 对外只暴露启动入口 [`run`]。
+//! 正常构建只对外暴露启动入口 [`run`]；`fuzzing` 特性另外提供带文档隐藏标记的
+//! 仓库内模糊测试入口。
 //!
 //! Library entry point for the Ram file server. Implementation details are
 //! split by responsibility across authentication, configuration, HTTP,
-//! logging, runtime, and server modules; only [`run`] is public.
+//! logging, runtime, and server modules. Normal builds expose only [`run`]; the
+//! `fuzzing` feature additionally exposes doc-hidden, repository-local fuzz hooks.
 
 #[macro_use]
 extern crate log;
@@ -15,11 +17,10 @@ extern crate log;
 mod auth;
 mod config;
 mod http;
+mod identity;
 mod logging;
-mod path_identity;
 mod runtime;
 mod server;
-mod source_identity;
 mod utils;
 
 #[cfg(not(target_os = "linux"))]
