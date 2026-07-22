@@ -51,7 +51,7 @@ percent-encoding = "2.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
-zip = { version = "4", default-features = false, features = ["deflate"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }
 # 为安全敏感的 ETag/If-* 解析保留最新稳定 typed-header 实现。headers 0.4 的 WebSocket 类型
 # 仍引入 digest/sha1 0.10，而 argon2 0.5.3 也依赖该栈，因此替换不会移除 digest 0.10；
 # 待稳定上游汇聚后重新审查。
