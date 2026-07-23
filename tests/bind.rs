@@ -212,6 +212,9 @@ fn real_unix_peer_uids_have_independent_source_buckets_and_logs() -> Result<(), 
     let marker_root = tmpdir();
     std::fs::set_permissions(marker_root.path(), std::fs::Permissions::from_mode(0o1777))?;
     let socket = socket_root.path().join("ram.sock");
+    let helper_exe = socket_root.path().join("peer-helper");
+    std::fs::copy(env::current_exe()?, &helper_exe)?;
+    std::fs::set_permissions(&helper_exe, std::fs::Permissions::from_mode(0o755))?;
     let marker = marker_root.path().join("first-ready");
     let mut cmd = ram_command(root.path(), port());
     cmd.args([
@@ -244,7 +247,7 @@ fn real_unix_peer_uids_have_independent_source_buckets_and_logs() -> Result<(), 
     assert_eq!(socket_metadata.gid(), SOCKET_GID);
 
     let mut first_command =
-        unix_peer_helper_command(&socket, "hold", Some(&marker), FIRST_UID, FIRST_UID)?;
+        unix_peer_helper_command(&helper_exe, &socket, "hold", Some(&marker), FIRST_UID, FIRST_UID)?;
     let mut first = first_command.spawn()?;
     let first_pid = first.id();
     let marker_deadline = Instant::now() + Duration::from_secs(3);
@@ -259,7 +262,8 @@ fn real_unix_peer_uids_have_independent_source_buckets_and_logs() -> Result<(), 
     }
 
     let second =
-        unix_peer_helper_command(&socket, "read", None, SECOND_UID, SECOND_UID)?.spawn()?;
+        unix_peer_helper_command(&helper_exe, &socket, "read", None, SECOND_UID, SECOND_UID)?
+            .spawn()?;
     let second_pid = second.id();
     let second_output = second.wait_with_output()?;
     assert!(
@@ -296,13 +300,14 @@ fn real_unix_peer_uids_have_independent_source_buckets_and_logs() -> Result<(), 
 fn real_unix_peer_uids_have_independent_source_buckets_and_logs() {}
 
 fn unix_peer_helper_command(
+    helper_exe: &std::path::Path,
     socket: &std::path::Path,
     mode: &str,
     marker: Option<&std::path::Path>,
     uid: u32,
     gid: u32,
 ) -> Result<Command, Error> {
-    let mut command = Command::new(env::current_exe()?);
+    let mut command = Command::new(helper_exe);
     command
         .args([
             "--exact",
