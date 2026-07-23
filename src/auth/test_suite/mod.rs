@@ -2160,9 +2160,9 @@ fn revocation_creation_under_extreme_umask_child() {
     if std::env::var_os("RAM_REVOCATION_UMASK_CHILD").is_none() {
         return;
     }
-    let previous = rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o777));
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("revocations.json");
+    let previous = rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o777));
     let state = persistent_token_state(&path);
     state
         .revoke(
