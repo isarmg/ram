@@ -2160,9 +2160,13 @@ fn revocation_creation_under_extreme_umask_child() {
     if std::env::var_os("RAM_REVOCATION_UMASK_CHILD").is_none() {
         return;
     }
-    let previous = rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o777));
+    // 先创建可搜索的夹具父目录，再收紧 umask；本测试只验证撤销状态候选文件和锁文件
+    // 能否修复最终权限，而不是要求 TempDir 在 000 mode 下仍可遍历。
+    // Create the searchable fixture parent before tightening umask. This test targets final
+    // revocation-state and lock-file modes, not TempDir traversal under a 000 directory mode.
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("revocations.json");
+    let previous = rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o777));
     let state = persistent_token_state(&path);
     state
         .revoke(

@@ -800,15 +800,29 @@ async fn global_request_limit_times_out_and_releases_on_body_drop() -> Result<()
     // 丢弃未消费 h2 请求体会发送流重置；响应体包装器随后必须为下一请求释放全局 permit。
     // Dropping an unconsumed h2 body resets the stream; the response wrapper must release the global permit.
     drop(blocked_body);
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let recovered = request_from(
-        port,
-        Ipv4Addr::new(127, 0, 0, 2),
-        &format!(
-            "GET /index.html HTTP/1.1\r\nHost: localhost\r\n{BASIC_AUTH}Connection: close\r\n\r\n"
-        ),
-    )?;
-    assert!(recovered.starts_with(b"HTTP/1.1 200"), "{recovered:?}");
+    // 流重置必须经过客户端连接任务、内核和服务器 h2 任务传播；并行测试负载下不存在可靠的
+    // 固定 200ms 上界。使用有截止时间的状态轮询，仍能区分最终释放和真实 permit 泄漏。
+    // The reset crosses the client connection task, kernel, and server h2 task, so a fixed 200 ms
+    // bound is not reliable under parallel test load. Deadline-bounded state polling still
+    // distinguishes eventual release from a real permit leak.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let recovered = request_from(
+            port,
+            Ipv4Addr::new(127, 0, 0, 2),
+            &format!(
+                "GET /index.html HTTP/1.1\r\nHost: localhost\r\n{BASIC_AUTH}Connection: close\r\n\r\n"
+            ),
+        )?;
+        if recovered.starts_with(b"HTTP/1.1 200") {
+            break;
+        }
+        assert!(recovered.starts_with(b"HTTP/1.1 503"), "{recovered:?}");
+        if Instant::now() >= deadline {
+            return Err("global request permit was not released after the h2 body reset".into());
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 
     connection_task.abort();
     Ok(())
