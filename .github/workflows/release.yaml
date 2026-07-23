@@ -353,16 +353,18 @@ jobs:
           ./scripts/write-release-metrics.sh \
             "$TARGET" "$stage/ram" "$stage/RELEASE-METRICS.txt"
           {
-            printf '### Release metrics: `%s`\n\n```text\n' "$TARGET"
+            printf "### Release metrics: \`%s\`\n\n\`\`\`text\n" "$TARGET"
             cat "$stage/RELEASE-METRICS.txt"
             printf '```\n'
           } >> "$GITHUB_STEP_SUMMARY"
-          file "$stage/ram" > "$stage/RUNTIME-LINKAGE.txt"
-          readelf --file-header "$stage/ram" >> "$stage/RUNTIME-LINKAGE.txt"
-          readelf --notes "$stage/ram" >> "$stage/RUNTIME-LINKAGE.txt"
-          readelf --program-headers "$stage/ram" >> "$stage/RUNTIME-LINKAGE.txt"
-          readelf --dynamic "$stage/ram" >> "$stage/RUNTIME-LINKAGE.txt"
-          readelf --version-info "$stage/ram" >> "$stage/RUNTIME-LINKAGE.txt"
+          {
+            file "$stage/ram"
+            readelf --file-header "$stage/ram"
+            readelf --notes "$stage/ram"
+            readelf --program-headers "$stage/ram"
+            readelf --dynamic "$stage/ram"
+            readelf --version-info "$stage/ram"
+          } > "$stage/RUNTIME-LINKAGE.txt"
           manifest="dist/$name.supply-chain.json"
           python3 scripts/check-release-manifest.py create \
             --version "$VERSION" \

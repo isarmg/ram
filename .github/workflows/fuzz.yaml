@@ -70,7 +70,7 @@ jobs:
       - name: Install pinned cargo-fuzz
         run: cargo install --locked cargo-fuzz --version 0.13.2
       - name: Verify locked fuzz dependency graph
-        run: cargo +${FUZZ_NIGHTLY} check --manifest-path fuzz/Cargo.toml --locked
+        run: cargo +"${FUZZ_NIGHTLY}" check --manifest-path fuzz/Cargo.toml --locked
       - name: Run bounded corpus smoke
         run: |
           set -euo pipefail
@@ -81,7 +81,7 @@ jobs:
           mkdir -p "$corpus_dir"
           cp -a "$seed_dir/." "$corpus_dir/"
           mkdir -p "fuzz/artifacts/${{ matrix.target }}"
-          cargo +${FUZZ_NIGHTLY} fuzz run "${{ matrix.target }}" \
+          cargo +"${FUZZ_NIGHTLY}" fuzz run "${{ matrix.target }}" \
             "$corpus_dir" -- \
             -runs=256 \
             -max_len=65536 \
@@ -134,7 +134,7 @@ jobs:
       - name: Install pinned cargo-fuzz
         run: cargo install --locked cargo-fuzz --version 0.13.2
       - name: Verify locked fuzz dependency graph
-        run: cargo +${FUZZ_NIGHTLY} check --manifest-path fuzz/Cargo.toml --locked
+        run: cargo +"${FUZZ_NIGHTLY}" check --manifest-path fuzz/Cargo.toml --locked
       - name: Run bounded long campaign
         run: |
           set -euo pipefail
@@ -145,7 +145,7 @@ jobs:
           mkdir -p "$corpus_dir"
           cp -a "$seed_dir/." "$corpus_dir/"
           mkdir -p "fuzz/artifacts/${{ matrix.target }}"
-          cargo +${FUZZ_NIGHTLY} fuzz run "${{ matrix.target }}" \
+          cargo +"${FUZZ_NIGHTLY}" fuzz run "${{ matrix.target }}" \
             "$corpus_dir" -- \
             -max_total_time=1800 \
             -max_len=65536 \
