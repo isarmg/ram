@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""对 crates.io 版本与 GitHub Release 草稿状态做关闭失败的发布判定。
+"""对 GitHub Release 与草稿状态做关闭失败的发布判定。
 
-Fail closed while classifying crates.io versions, post-publish visibility, and
-resumable GitHub release drafts.
+Fail closed while classifying published GitHub Releases and resumable drafts.
 """
 
 from __future__ import annotations
@@ -19,7 +18,6 @@ from typing import Any
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 MAX_RELEASE_PAGES = 100
 VERSION_PATTERN = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?")
-CRATE_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
 REPOSITORY_PATTERN = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
 
@@ -64,36 +62,6 @@ def require_status(value: str) -> int:
     return int(value)
 
 
-def verify_crates_version_response(
-    status: int, payload: Any | None, crate_name: str, version: str
-) -> str | None:
-    """返回已存在版本的 SHA-256；404 返回 None，模糊响应关闭失败。
-
-    Return an existing version's SHA-256; 404 returns None and ambiguous responses fail closed.
-    """
-
-    if CRATE_PATTERN.fullmatch(crate_name) is None:
-        raise ReleaseStateError(f"invalid crate name {crate_name!r}")
-    validate_version(version)
-    if status == 404:
-        return None
-    if status != 200:
-        raise ReleaseStateError(
-            f"cannot prove crates.io version absence: HTTP {status}"
-        )
-    if not isinstance(payload, dict) or not isinstance(payload.get("version"), dict):
-        raise ReleaseStateError("crates.io version response is malformed")
-    record = payload["version"]
-    if record.get("crate") != crate_name or record.get("num") != version:
-        raise ReleaseStateError(
-            "crates.io returned a version record that does not match the request"
-        )
-    checksum = record.get("checksum")
-    if not isinstance(checksum, str) or re.fullmatch(r"[0-9a-f]{64}", checksum) is None:
-        raise ReleaseStateError("crates.io version response has an invalid checksum")
-    return checksum
-
-
 def verify_published_release_response(
     status: int, payload: Any | None, expected_tag: str
 ) -> None:
@@ -118,44 +86,6 @@ def verify_published_release_response(
     raise ReleaseStateError(
         f"published release {expected_tag} already exists and must not be replaced"
     )
-
-
-def verify_existing_crate_checksum(expected: str, actual: str) -> None:
-    for value, label in ((expected, "crates.io"), (actual, "verified source")):
-        if re.fullmatch(r"[0-9a-f]{64}", value) is None:
-            raise ReleaseStateError(f"{label} crate checksum is invalid")
-    if expected != actual:
-        raise ReleaseStateError(
-            "existing crates.io package hash does not match the verified source"
-        )
-
-
-def classify_post_publish_crate(
-    status: int,
-    payload: Any | None,
-    crate_name: str,
-    version: str,
-    verified_source_checksum: str,
-) -> str:
-    """把暂时 404 分类为 pending；仅在远端 checksum 精确相同时返回 verified。
-
-    Classify a transient 404 as pending and return verified only when the remote
-    checksum exactly matches the previously verified source package.
-    """
-
-    # 中文：先独立验证本地证据格式，避免损坏的 checksum 文件被误分类为“等待远端可见”。
-    # English: Validate the local evidence first so a corrupt checksum file cannot be mistaken for
-    # temporary remote propagation delay.
-    verify_existing_crate_checksum(
-        verified_source_checksum, verified_source_checksum
-    )
-    remote_checksum = verify_crates_version_response(
-        status, payload, crate_name, version
-    )
-    if remote_checksum is None:
-        return "pending"
-    verify_existing_crate_checksum(remote_checksum, verified_source_checksum)
-    return "verified"
 
 
 def classify_draft_page(
@@ -293,96 +223,11 @@ def expect_rejected(case: Any) -> None:
 
 
 def self_test() -> None:
-    crate_name = "example-crate"
     version = "1.2.3"
     tag = f"v{version}"
     repository = "example/project"
     commit = "a" * 40
     marker = release_marker(repository, tag, commit)
-
-    if verify_crates_version_response(404, None, crate_name, version) is not None:
-        raise AssertionError("404 crates.io response was not classified as absent")
-    checksum = "a" * 64
-    existing = {
-        "version": {"crate": crate_name, "num": version, "checksum": checksum}
-    }
-    if verify_crates_version_response(200, existing, crate_name, version) != checksum:
-        raise AssertionError("existing crates.io checksum was not returned")
-    verify_existing_crate_checksum(checksum, checksum)
-    if (
-        classify_post_publish_crate(
-            404, None, crate_name, version, checksum
-        )
-        != "pending"
-    ):
-        raise AssertionError("post-publish 404 was not classified as pending")
-    if (
-        classify_post_publish_crate(
-            200, existing, crate_name, version, checksum
-        )
-        != "verified"
-    ):
-        raise AssertionError("matching post-publish crate was not verified")
-    expect_rejected(
-        lambda: classify_post_publish_crate(
-            200, existing, crate_name, version, "2" * 64
-        )
-    )
-    expect_rejected(
-        lambda: classify_post_publish_crate(
-            500, None, crate_name, version, checksum
-        )
-    )
-    expect_rejected(
-        lambda: classify_post_publish_crate(
-            200, {}, crate_name, version, checksum
-        )
-    )
-    expect_rejected(
-        lambda: classify_post_publish_crate(
-            404, None, crate_name, version, "invalid"
-        )
-    )
-    for invalid_expected, invalid_actual in (
-        ("2" * 64, checksum),
-        (checksum.upper(), checksum),
-        (checksum, "invalid"),
-    ):
-        expect_rejected(
-            lambda invalid_expected=invalid_expected, invalid_actual=invalid_actual: verify_existing_crate_checksum(
-                invalid_expected, invalid_actual
-            )
-        )
-    for status, payload in (
-        (200, {}),
-        (
-            200,
-            {
-                "version": {
-                    "crate": crate_name,
-                    "num": "9.9.9",
-                    "checksum": checksum,
-                }
-            },
-        ),
-        (
-            200,
-            {
-                "version": {
-                    "crate": crate_name,
-                    "num": version,
-                    "checksum": "not-a-checksum",
-                }
-            },
-        ),
-        (403, None),
-        (500, None),
-    ):
-        expect_rejected(
-            lambda status=status, payload=payload: verify_crates_version_response(
-                status, payload, crate_name, version
-            )
-        )
 
     verify_published_release_response(404, None, tag)
     published = {"tag_name": tag, "draft": False}
@@ -505,13 +350,6 @@ def parse_prerelease(value: str) -> bool:
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description=__doc__)
     commands = root.add_subparsers(dest="command", required=True)
-    crates_version = commands.add_parser(
-        "crates-version", help="require a crates.io version lookup to prove absence"
-    )
-    crates_version.add_argument("status")
-    crates_version.add_argument("response", type=pathlib.Path)
-    crates_version.add_argument("crate_name")
-    crates_version.add_argument("version")
     published = commands.add_parser(
         "published", help="reject any published GitHub release for a tag"
     )
@@ -537,20 +375,6 @@ def parser() -> argparse.ArgumentParser:
     draft.add_argument("commit")
     draft.add_argument("repository")
     draft.add_argument("prerelease", type=parse_prerelease)
-    crate_checksum = commands.add_parser(
-        "crate-checksum", help="require an existing crate to equal verified source bytes"
-    )
-    crate_checksum.add_argument("expected")
-    crate_checksum.add_argument("actual")
-    post_publish = commands.add_parser(
-        "post-publish",
-        help="classify remote visibility and require the published crate checksum",
-    )
-    post_publish.add_argument("status")
-    post_publish.add_argument("response", type=pathlib.Path)
-    post_publish.add_argument("crate_name")
-    post_publish.add_argument("version")
-    post_publish.add_argument("verified_source_checksum")
     commands.add_parser("self-test", help="run deterministic positive and negative fixtures")
     return root
 
@@ -560,13 +384,6 @@ def main() -> int:
     try:
         if args.command == "self-test":
             self_test()
-        elif args.command == "crates-version":
-            status = require_status(args.status)
-            payload = None if status == 404 else read_json(args.response)
-            checksum = verify_crates_version_response(
-                status, payload, args.crate_name, args.version
-            )
-            print("absent" if checksum is None else f"existing={checksum}")
         elif args.command == "published":
             status = require_status(args.status)
             payload = None if status == 404 else read_json(args.response)
@@ -594,21 +411,6 @@ def main() -> int:
                 args.prerelease,
             )
             print(f"release draft {args.release_id} identity matches this workflow run")
-        elif args.command == "post-publish":
-            status = require_status(args.status)
-            payload = None if status == 404 else read_json(args.response)
-            print(
-                classify_post_publish_crate(
-                    status,
-                    payload,
-                    args.crate_name,
-                    args.version,
-                    args.verified_source_checksum,
-                )
-            )
-        else:
-            verify_existing_crate_checksum(args.expected, args.actual)
-            print("existing crates.io checksum matches the verified source")
     except ReleaseStateError as error:
         print(f"release state verification failed: {error}", file=sys.stderr)
         return 1

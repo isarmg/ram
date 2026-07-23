@@ -667,6 +667,33 @@ test("directory download uses the browser-native streaming path", async ({ page 
   }
 });
 
+test("desktop header retains the compact dufs toolbar layout", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await page.goto("/");
+  const breadcrumb = page.getByRole("navigation", { name: "Breadcrumb" });
+  const toolbox = page.locator(".toolbox");
+  const upload = page.getByRole("button", { name: "Upload files" });
+  const search = page.getByRole("searchbox", { name: "Search folders or files" });
+  const searchbar = page.getByRole("search", { name: "Search files and folders" });
+  const [breadcrumbBox, toolboxBox, uploadBox, searchBox, searchbarBox] = await Promise.all([
+    breadcrumb.boundingBox(),
+    toolbox.boundingBox(),
+    upload.boundingBox(),
+    search.boundingBox(),
+    searchbar.boundingBox(),
+  ]);
+  expect(breadcrumbBox).not.toBeNull();
+  expect(toolboxBox).not.toBeNull();
+  expect(uploadBox).not.toBeNull();
+  expect(searchBox).not.toBeNull();
+  expect(searchbarBox).not.toBeNull();
+  expect(Math.abs(toolboxBox.x - (breadcrumbBox.x + breadcrumbBox.width))).toBeLessThanOrEqual(1);
+  expect(searchbarBox.x - (toolboxBox.x + toolboxBox.width)).toBeCloseTo(10, 0);
+  expect(searchbarBox.height).toBeCloseTo(24, 0);
+  expect(searchBox.height).toBeCloseTo(22, 0);
+  expect(uploadBox.height).toBeLessThan(searchbarBox.height);
+});
+
 test("mobile viewport and keyboard navigation keep controls usable", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/");

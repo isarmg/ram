@@ -712,15 +712,8 @@ flowchart TD
 flowchart TD
   A["受保护 annotated vX.Y.Z tag<br/>Protected annotated vX.Y.Z tag"] --> B["validate job"]
   B --> C["签名、版本、默认分支可达性<br/>Signature, version, default-branch ancestry"]
-  C --> D{"validate: crates.io 预检<br/>Version preflight"}
-  D -- "prerelease" --> E0["不适用 / Not applicable"]
-  D -- "stable: absent" --> E1["记录不存在 / Record absent"]
-  D -- "stable: exists" --> E2["记录远端 SHA-256<br/>Record remote SHA-256"]
-  E0 --> E["Rust + frontend + browsers + audit + package"]
-  E1 --> E
-  E2 --> E
-  E --> F["保存已验证 .crate SHA-256；若已存在则立即比对<br/>Preserve verified crate; compare existing checksum"]
-  F --> G0["metadata job"]
+  C --> E["Rust + frontend + browsers + supply-chain audit"]
+  E --> G0["metadata job"]
   G0 --> G["CycloneDX + SPDX + licenses + semantic verification"]
   G --> H{"Native build matrix"}
   H --> I["x86_64 GNU native"]
@@ -732,13 +725,7 @@ flowchart TD
   M --> N["上传完整 draft / Upload complete draft"]
   N --> O["精确资产清单 / Exact inventory"]
   O --> P["保持私有 draft / Keep draft private"]
-  P --> Q{"稳定版? / Stable?"}
-  Q -- "stable + validate=absent" --> S["OIDC + 重新打包/hash 比对 + publish<br/>OIDC + repackage/checksum match + publish"]
-  S --> S2["有界轮询远端可见性 + 精确 checksum<br/>Bounded visibility poll + exact checksum"]
-  Q -- "stable + validate=exists" --> T["复用 validate 中已成功的 checksum 比对<br/>Reuse validated existing checksum match"]
-  S2 --> U["finalize_release: Publish Release"]
-  T --> U
-  Q -- "prerelease" --> U
+  P --> U["finalize_release: 重新验证并公开<br/>Reverify and publish"]
   V["同 tag/commit/marker 的失败 draft<br/>Failed draft for same tag/commit/marker"] --> W["安全删除后重建 / Safe cleanup"]
   W --> L
 ```
@@ -757,15 +744,13 @@ flowchart TD
 - English: x86-64 and ARM64 build and smoke on matching native runners. The
   draft publishes only after exact attachment name/type/count verification.
 - 中文：每个架构有独立 CycloneDX；外层 manifest 直接绑定 `ram`、CycloneDX 与
-  SPDX 的 SHA-256，并与对应归档进入 attestation。`cargo publish` 返回成功还不够；新版本
-  必须在有界轮询内从 crates.io 读回相同 checksum，已存在版本则必须在 validate 阶段先完成
-  同样比对。任一路径闭环前，稳定版始终保持 draft。
+  SPDX 的 SHA-256，并与对应归档进入 attestation。Release 在独立 finalizer 重新下载制品并
+  验证草稿身份、附件数量、名称、大小与 SHA-256 前始终保持私有。
 - English: Each architecture has its own CycloneDX document. An outer manifest
   directly binds the SHA-256 of `ram`, CycloneDX, and SPDX and is attested with
-  the matching archive. A successful `cargo publish` return is insufficient: a
-  new version must be read back from crates.io with the same checksum within a
-  bounded poll, while an existing version must pass that comparison during
-  validation. Stable releases remain drafts until either path is closed.
+  the matching archive. The Release remains private until an independent
+  finalizer redownloads the artifacts and verifies draft identity plus every
+  attachment's count, name, size, and SHA-256.
 
 ## 10. 建议阅读顺序 / Suggested reading order
 

@@ -6,7 +6,7 @@ Ram 是一个以安全边界和可运维性为重点的 Linux 文件服务管理
 文件或目录映射为 HTTP/WebDAV 资源，提供现代浏览器管理界面、适合 `curl`
 和 WebDAV 客户端的接口、细粒度路径权限、TLS、断点传输、搜索、归档和哈希。
 
-crates.io 包名是 `ram-fileserver`，安装后的命令名是 `ram`。项目源自
+Cargo 包名是 `ram-fileserver`，构建后的命令名是 `ram`。项目源自
 [dufs](https://github.com/sigoden/dufs)，当前由 Ram 贡献者维护。
 
 > 服务端支持 Linux GNU 的 x86_64 与 ARM64 架构；官方制品要求 glibc 2.39 或更新
@@ -92,9 +92,9 @@ GitHub Release 同时提供 x86_64 和 ARM64 GNU/glibc 2.39+ 制品。将 `TARGE
 
 ```sh
 TARGET=x86_64-unknown-linux-gnu # ARM64 使用 aarch64-unknown-linux-gnu
-sha256sum --check "ram-v0.47.0-${TARGET}.tar.gz.sha256"
-tar -xzf "ram-v0.47.0-${TARGET}.tar.gz"
-sudo install -m 0755 "ram-v0.47.0-${TARGET}/ram" /usr/local/bin/ram
+sha256sum --check "ram-v0.1.0-${TARGET}.tar.gz.sha256"
+tar -xzf "ram-v0.1.0-${TARGET}.tar.gz"
+sudo install -m 0755 "ram-v0.1.0-${TARGET}/ram" /usr/local/bin/ram
 ```
 
 示例版本号仅用于展示；应替换为实际发布版本。
@@ -1761,18 +1761,14 @@ cargo package --locked
 2. 执行前端静态检查、模块/DOM 测试，以及 Chromium、Firefox、WebKit 三浏览器的交互与
    可访问性测试。
 3. 执行 npm audit、RustSec 和 cargo-deny 供应链检查。
-4. 验证 crates.io 源码包不包含测试目录、`node_modules` 或可疑私钥，并在验证与发布
-   job 之间比较源码包 SHA-256，避免重新打包时静默漂移。
-5. 生成并语义校验 CycloneDX、SPDX SBOM 和第三方许可证清单。
-6. 以 x86-64 v1 与 generic ARM64 CPU 基线在原生 runner 上分别构建 Linux GNU 制品。
-7. 对最终 tar 执行精确成员/类型策略、ELF 机器类型、PIE、RELRO、NX、动态库白名单、
+4. 生成并语义校验 CycloneDX、SPDX SBOM 和第三方许可证清单。
+5. 以 x86-64 v1 与 generic ARM64 CPU 基线在原生 runner 上分别构建 Linux GNU 制品。
+6. 对最终 tar 执行精确成员/类型策略、ELF 机器类型、PIE、RELRO、NX、动态库白名单、
    glibc 2.39 上限、版本绑定和原生协议冒烟，再生成 SHA-256 与 provenance/SBOM attestation。
-8. 先将所有附件上传到私有 Release 草稿，并对草稿身份与精确附件清单做第二次校验；此时
+7. 先将所有附件上传到私有 Release 草稿，并对草稿身份与精确附件清单做第二次校验；此时
    不公开 Release。
-9. 预发布版本可直接进入最终发布；稳定版若 crates.io 尚无该版本，则用短期 OIDC 凭据发布
-   已验证的源码包，并在有界轮询中读回完全相同的 SHA-256；若版本已存在，则复用验证阶段
-   已完成的精确 checksum 比对。只有对应路径闭环后，独立 finalizer 才重新验证草稿并公开
-   GitHub Release。
+8. 独立 finalizer 重新下载已验证制品，复核草稿身份、附件数量、名称、大小与 SHA-256，
+   然后公开 GitHub Release；稳定版和预发布版均不发布到外部软件包注册表。
 
 压缩包包含 `ram`、MIT 许可证、本文档、配置示例、依赖清单、运行时链接信息和供应链
 元数据。不发布 musl、Windows 或 macOS 制品。
@@ -1822,7 +1818,7 @@ Ram is a Linux file-service manager centered on security boundaries and operatio
 one local file or directory to HTTP/WebDAV, with a modern browser manager, `curl`/DAV interfaces,
 fine-grained path permissions, TLS, resumable transfers, search, archives, and hashing.
 
-The crates.io package is `ram-fileserver`; the installed command is `ram`. The project originated
+The Cargo package is `ram-fileserver`; the built command is `ram`. The project originated
 from [dufs](https://github.com/sigoden/dufs) and is maintained by Ram contributors.
 
 > The server supports Linux GNU x86_64 and ARM64. Official binaries require glibc 2.39 or newer;
@@ -1892,9 +1888,9 @@ version with the actual release):
 
 ```sh
 TARGET=x86_64-unknown-linux-gnu # use aarch64-unknown-linux-gnu on ARM64
-sha256sum --check "ram-v0.47.0-${TARGET}.tar.gz.sha256"
-tar -xzf "ram-v0.47.0-${TARGET}.tar.gz"
-sudo install -m 0755 "ram-v0.47.0-${TARGET}/ram" /usr/local/bin/ram
+sha256sum --check "ram-v0.1.0-${TARGET}.tar.gz.sha256"
+tar -xzf "ram-v0.1.0-${TARGET}.tar.gz"
+sudo install -m 0755 "ram-v0.1.0-${TARGET}/ram" /usr/local/bin/ram
 ```
 
 ### 3.2 Source build
@@ -2720,20 +2716,16 @@ Cargo/npm/README/CHANGELOG versions. It:
 1. runs fmt, Clippy, both Rust feature matrices, rustdoc, frontend static/module/DOM tests, and
    Chromium/Firefox/WebKit interaction/accessibility;
 2. runs npm audit, RustSec, cargo-deny, governance, license, and release-policy checks;
-3. validates the crates.io source package for exact version/content/no test keys or node_modules and
-   preserves its SHA-256 between validation and publication;
-4. generates and semantically validates CycloneDX/SPDX SBOMs and third-party licenses;
-5. builds x86-64 v1 and generic ARM64 GNU artifacts on native runners;
-6. validates exact tar names/types, ELF machine, PIE/RELRO/NX, dynamic-library allowlist, glibc 2.39
+3. generates and semantically validates CycloneDX/SPDX SBOMs and third-party licenses;
+4. builds x86-64 v1 and generic ARM64 GNU artifacts on native runners;
+5. validates exact tar names/types, ELF machine, PIE/RELRO/NX, dynamic-library allowlist, glibc 2.39
    ceiling, version binding, native health/auth/TLS/Range/write/shutdown smoke, checksums, and
    provenance/SBOM attestations;
-7. uploads every attachment to a private draft and revalidates the draft identity and exact asset
+6. uploads every attachment to a private draft and revalidates the draft identity and exact asset
    inventory without publishing it;
-8. for a stable version absent from crates.io, uses short-lived OIDC to publish the verified source
-   package and polls within a fixed bound until crates.io reports the identical SHA-256. An existing
-   version reuses the exact checksum comparison completed during validation. Only after the applicable
-   path closes does an independent finalizer reverify and publish the GitHub Release; prereleases skip
-   the crates.io branch.
+7. has an independent finalizer redownload the verified artifacts, recheck the draft identity and each
+   attachment's count, name, size, and SHA-256, and then publish the GitHub Release. Stable releases
+   and prereleases are not published to an external package registry.
 
 Archives contain `ram`, the MIT license, README, example configuration, dependency/licenses, runtime
 links, and supply-chain metadata. There are no official musl, Windows, or macOS artifacts.

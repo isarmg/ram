@@ -1,6 +1,6 @@
 [package]
 name = "ram-fileserver"
-version = "0.47.0"
+version = "0.1.0"
 edition = "2024"
 resolver = "3"
 rust-version = "1.97.1"
@@ -10,7 +10,7 @@ license = "MIT"
 readme = "README.md"
 homepage = "https://github.com/isarmg/ram"
 repository = "https://github.com/isarmg/ram"
-publish = ["crates-io"]
+publish = false
 categories = ["command-line-utilities", "web-programming::http-server"]
 keywords = ["static", "file", "server", "webdav", "cli"]
 include = [

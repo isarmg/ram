@@ -13,10 +13,11 @@
   --svg-tertiary: #24292e;
   --border-primary: #ddd;
   --border-secondary: #ced4da;
+  --touch-control-size: 45px;
 }
 
 html {
-  font-family: system-ui, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, Roboto, Helvetica, Arial, sans-serif;
   line-height: 1.5;
   color: var(--text-primary);
 }
@@ -54,13 +55,10 @@ svg {
   position: sticky;
   top: 0;
   background-color: var(--bg-tertiary);
-  gap: 0.35rem;
   z-index: 1;
 }
 
 .breadcrumb {
-  flex: 1 1 auto;
-  min-width: 0;
   font-size: 1.25em;
   padding-right: 0.6em;
   word-break: break-all;
@@ -92,8 +90,6 @@ svg {
 
 .toolbox {
   display: flex;
-  align-items: center;
-  flex-wrap: wrap;
   margin-right: 10px;
 }
 
@@ -105,7 +101,7 @@ svg {
 
 .toolbox .control {
   cursor: pointer;
-  padding: 0.15rem 0.25rem;
+  padding: 0 0 0 0.25em;
 }
 
 button.control,
@@ -120,18 +116,9 @@ button.control,
   font: inherit;
 }
 
-/*
- * 桌面鼠标用户也需要 WCAG 2.2 的 24 CSS px 最小目标；粗指针/窄屏规则
- * 会在下方进一步扩大到 45 px。额外保留 1 px 布局余量，因为 Firefox
- * 在设备像素换算后可能把精确的 24/44 px 暴露为略小于阈值的小数。
- * `border-box` 使图标、padding 和最小值共用一个可预测的点击框。
- *
- * Desktop pointer users still need the WCAG 2.2 24 CSS-pixel minimum target;
- * use a one-pixel layout margin because Firefox can expose an exact 24/44 CSS
- * px box as a fraction just below the threshold after device-pixel conversion.
- * The coarse-pointer/narrow-screen rule below expands it to 45px.
- * `border-box` keeps icon, padding, and the minimum inside one predictable box.
- */
+/* Keep semantic buttons visually identical to the compact dufs 0.46 controls.
+ * Coarse pointers and narrow screens receive larger hit areas below.
+ * 语义按钮在桌面端保持 dufs 0.46 的紧凑外观；触屏尺寸在下方单独放大。 */
 .control,
 .action-btn,
 .save-btn,
@@ -139,15 +126,15 @@ button.control,
 .cancel-upload-btn,
 .retry-btn {
   box-sizing: border-box;
-  min-width: 25px;
-  min-height: 25px;
 }
 
 .searchbar {
   display: flex;
   flex-wrap: nowrap;
+  box-sizing: content-box;
   width: 246px;
-  min-height: 24px;
+  height: 22px;
+  min-height: 0;
   background-color: var(--bg-secondary);
   transition: all .15s;
   border: 1px var(--border-primary) solid;
@@ -159,6 +146,7 @@ button.control,
   box-sizing: border-box;
   width: 100%;
   height: 100%;
+  min-height: 0;
   font-size: 16px;
   line-height: 16px;
   padding: 1px;
@@ -182,12 +170,17 @@ button.control,
 }
 
 .searchbar .icon {
-  color: var(--svg-tertiary);
-  padding: 3px 3px;
+  display: block;
+  flex: 0 1 auto;
+  box-sizing: content-box;
+  height: auto;
+  color: #9a9a9a;
+  padding: 3px;
   cursor: pointer;
 }
 
 .searchbar svg {
+  display: inline;
   fill: var(--svg-tertiary);
 }
 
@@ -254,6 +247,7 @@ button.control,
 
 .paths-table .cell-actions {
   width: 90px;
+  display: flex;
   padding-left: 0.5em;
 }
 
@@ -297,10 +291,7 @@ button.control,
 }
 
 .action-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0.15rem 0.3rem;
+  padding: 0 0.3em 0 0;
   cursor: pointer;
 }
 
@@ -350,18 +341,17 @@ a:focus-visible {
 
 .toolbox-right {
   margin-left: auto;
-  margin-right: 0;
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
+  margin-right: 2em;
 }
 
 .save-btn {
+  padding: 0;
   cursor: pointer;
   user-select: none;
 }
 
 .logout-btn {
+  padding: 0;
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -378,15 +368,24 @@ a:focus-visible {
   .cancel-upload-btn,
   .retry-btn {
     box-sizing: border-box;
-    min-width: 45px;
-    min-height: 45px;
+    min-width: var(--touch-control-size);
+    min-height: var(--touch-control-size);
     touch-action: manipulation;
   }
 
-  .searchbar,
+  .searchbar {
+    box-sizing: border-box;
+    height: var(--touch-control-size);
+    min-height: var(--touch-control-size);
+  }
+
   .searchbar #search {
     box-sizing: border-box;
-    min-height: 45px;
+    min-height: var(--touch-control-size);
+  }
+
+  .searchbar .icon {
+    flex-basis: var(--touch-control-size);
   }
 }
 
@@ -411,6 +410,15 @@ a:focus-visible {
   .breadcrumb {
     flex-basis: 100%;
     font-size: 1.05rem;
+  }
+
+  .toolbox {
+    align-items: center;
+    flex-wrap: wrap;
+  }
+
+  .toolbox-right {
+    margin-right: 0;
   }
 
   .main {

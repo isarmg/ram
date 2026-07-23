@@ -183,8 +183,8 @@ def check() -> None:
             "tag ruleset",
             "immutable releases",
             "Private vulnerability reporting",
-            "完全相同的恢复路径",
-            "exactly matches the newly verified",
+            "只能由独立 finalizer 公开",
+            "Only the independent finalizer may publish",
             "target-specific CycloneDX",
         ),
     )
@@ -205,8 +205,8 @@ def check() -> None:
     for relative in required_package_documents:
         if relative not in package_include:
             raise ValueError(f"Cargo.toml package.include must contain {relative}")
-    if cargo_package.get("publish") != ["crates-io"]:
-        raise ValueError("Cargo.toml package.publish must be exactly ['crates-io']")
+    if cargo_package.get("publish") is not False:
+        raise ValueError("Cargo.toml package.publish must be false")
     changelog = read("docs/CHANGELOG.md")
     require_needles(
         "docs/CHANGELOG.md",
@@ -233,11 +233,6 @@ def check() -> None:
             'mv "$output.json" "release-metadata/$output.json"',
             "release-metadata/ram-fileserver-*.cdx.json",
             "environment: release",
-            "Preflight the crates.io version",
-            "scripts/check-release-state.py crate-checksum",
-            "Verify published crate visibility and checksum",
-            "scripts/check-release-state.py post-publish",
-            "for attempt in {1..12}",
             "scripts/check-release-state.py draft",
             "--existing-draft-id",
             "--page-number",
@@ -247,16 +242,13 @@ def check() -> None:
             "scripts/check-release-assets.py published",
             '"$GITHUB_SHA" "$GITHUB_REPOSITORY" "$PRERELEASE"',
             'scripts/check-release-assets.py local dist "$VERSION"',
-            "verified-source-package",
             "draft: true",
             "prepare_release:",
             "finalize_release:",
-            "needs.validate.outputs.prerelease == 'false'",
-            "needs.validate.outputs.crate_exists != 'true'",
-            "needs.publish-crate.result == 'success'",
+            "needs: [validate, prepare_release]",
+            "Publish the verified GitHub release",
             "scripts/check-release-manifest.py create",
             "predicate-path:",
-            "cargo publish --locked --no-verify --registry crates-io",
             "ram-release-workflow:${{ github.repository }}",
             "cp LICENSE README.md config.example.yaml",
             'cp -R docs "$stage/"',
@@ -391,14 +383,13 @@ def check() -> None:
         "scripts/check-release-state.py",
         release_state_checker,
         (
-            "verify_crates_version_response",
-            "classify_post_publish_crate",
             "verify_published_release_response",
             "classify_draft_page",
+            "verify_draft_identity",
+            "release_marker",
             "body.count(marker) != 1",
             'release.get("target_commitish") != expected_commit',
             "MAX_RELEASE_PAGES",
-            "checksum",
             "def self_test()",
         ),
     )

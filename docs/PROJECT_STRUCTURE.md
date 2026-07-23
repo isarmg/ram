@@ -65,8 +65,8 @@ tests/
 ```
 
 测试只能修改临时目录或忽略的 `target/`。TLS 生成脚本必须相对自身路径写入，不能依赖调用者
-当前目录。`fixtures/` 中的私钥仅供测试，不能进入 crates.io 包；发布归档检查器使用精确成员
-白名单阻止它们进入二进制制品。
+当前目录。`fixtures/` 中的私钥仅供测试；发布归档检查器使用精确成员白名单阻止它们进入
+二进制制品。
 
 ## 4. Fuzz、基准与脚本
 
@@ -78,7 +78,7 @@ tests/
 
 ## 5. 生成物与发布元数据
 
-`target/`、`dist/`、`verified-source/`、`smoke-diagnostics/`、覆盖率输出和本地依赖目录都属于
+`target/`、`dist/`、`smoke-diagnostics/`、覆盖率输出和本地依赖目录都属于
 可删除生成物。`release-metadata/` 只保留目录说明；CycloneDX、SPDX 和第三方许可证报告在
 发布任务中从锁文件重新生成、校验并作为短期 artifact 传递。这样避免提交时间戳、随机 UUID
 和构建机绝对路径，同时让发布证据绑定到实际构建。
@@ -165,9 +165,8 @@ tests/
 ```
 
 Tests write only to temporary directories or ignored `target/` paths. The TLS generator writes relative
-to its own location, never the caller's current directory. Private keys under `fixtures/` are test-only
-and excluded from the crates.io package; the release archive checker uses an exact member allowlist to
-keep them out of binary artifacts.
+to its own location, never the caller's current directory. Private keys under `fixtures/` are test-only;
+the release archive checker uses an exact member allowlist to keep them out of binary artifacts.
 
 ## 4. Fuzzing, benchmarks, and scripts
 
@@ -182,7 +181,7 @@ keep them out of binary artifacts.
 
 ## 5. Generated files and release metadata
 
-`target/`, `dist/`, `verified-source/`, `smoke-diagnostics/`, coverage output, and local dependency trees
+`target/`, `dist/`, `smoke-diagnostics/`, coverage output, and local dependency trees
 are disposable. `release-metadata/` retains only its directory contract. CycloneDX, SPDX, and
 third-party-license reports are regenerated from lock files during release, validated, and transferred
 as short-lived artifacts. This avoids committing timestamps, random UUIDs, and build-machine absolute
