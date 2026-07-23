@@ -1,0 +1,78 @@
+{
+  "schema": 1,
+  "mode": "trend",
+  "notes": [
+    "Trend mode reports changes but does not fail CI on coverage percentages.",
+    "The Rust baseline is unset because the instrumentation scope changed to the default TLS production configuration.",
+    "After at least 10 stable main-branch runs with the current scope, set a reviewed baseline and floors, then change mode to enforce.",
+    "Never update this baseline automatically in CI."
+  ],
+  "stabilization": {
+    "minimum_main_runs": 10,
+    "global_tolerance_percentage_points": 0.5,
+    "security_group_tolerance_percentage_points": 1
+  },
+  "baseline": {
+    "schema": 1,
+    "rust": null,
+    "frontend": {
+      "total": {
+        "lines": {
+          "total": 612,
+          "covered": 47,
+          "percent": 7.68
+        },
+        "functions": {
+          "total": 89,
+          "covered": 16,
+          "percent": 17.98
+        },
+        "branches": {
+          "total": 288,
+          "covered": 42,
+          "percent": 14.58
+        },
+        "statements": {
+          "total": 654,
+          "covered": 53,
+          "percent": 8.1
+        }
+      }
+    }
+  },
+  "targets": {
+    "rust": {
+      "total": {
+        "lines": 75,
+        "functions": 70,
+        "regions": 70
+      },
+      "groups": {
+        "auth": {
+          "lines": 85
+        },
+        "filesystem": {
+          "lines": 80
+        },
+        "write-preconditions": {
+          "lines": 85
+        },
+        "webdav": {
+          "lines": 85
+        },
+        "range": {
+          "lines": 90
+        }
+      }
+    },
+    "frontend": {
+      "total": {
+        "lines": 75,
+        "functions": 70,
+        "branches": 70,
+        "statements": 75
+      }
+    }
+  },
+  "floors": null
+}

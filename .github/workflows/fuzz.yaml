@@ -1,0 +1,162 @@
+name: Parser fuzzing
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/fuzz.yaml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "fuzz/**"
+      - "src/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/fuzz.yaml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "fuzz/**"
+      - "src/**"
+  schedule:
+    - cron: "23 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      long_campaign:
+        description: "Run the bounded 30-minute-per-target campaign"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+  FUZZ_NIGHTLY: nightly-2026-07-22
+
+jobs:
+  smoke:
+    name: Smoke ${{ matrix.target }}
+    if: ${{ github.event_name != 'schedule' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - digest_auth_params
+          - uri_path
+          - range_if_range
+          - webdav_xml
+          - destination_host_prefix
+          - log_format
+          - zip_entry_name
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned nightly toolchain
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+        with:
+          toolchain: nightly-2026-07-22
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: fuzz-${{ matrix.target }}
+          workspaces: fuzz
+      - name: Install pinned cargo-fuzz
+        run: cargo install --locked cargo-fuzz --version 0.13.2
+      - name: Verify locked fuzz dependency graph
+        run: cargo +"${FUZZ_NIGHTLY}" check --manifest-path fuzz/Cargo.toml --locked
+      - name: Run bounded corpus smoke
+        run: |
+          set -euo pipefail
+          seed_dir="fuzz/corpus/${{ matrix.target }}"
+          corpus_dir="target/fuzz-corpus/${{ matrix.target }}"
+          test -n "$(find "$seed_dir" -maxdepth 1 -type f -print -quit)"
+          rm -rf "$corpus_dir"
+          mkdir -p "$corpus_dir"
+          cp -a "$seed_dir/." "$corpus_dir/"
+          mkdir -p "fuzz/artifacts/${{ matrix.target }}"
+          cargo +"${FUZZ_NIGHTLY}" fuzz run "${{ matrix.target }}" \
+            "$corpus_dir" -- \
+            -runs=256 \
+            -max_len=65536 \
+            -timeout=5 \
+            -rss_limit_mb=2048 \
+            -artifact_prefix="fuzz/artifacts/${{ matrix.target }}/"
+      - name: Upload reproducer on failure
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-smoke-${{ matrix.target }}-${{ github.sha }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore
+          retention-days: 30
+
+  long-campaign:
+    name: Long campaign ${{ matrix.target }}
+    # 定时计算默认关闭且关闭失败；仓库所有者必须显式设置 RAM_SCHEDULED_FUZZ=true，
+    # 或在手动触发时明确选择输入。
+    # Scheduled compute is fail-closed/off by default. A repository owner must
+    # explicitly set RAM_SCHEDULED_FUZZ=true, or choose the manual input.
+    if: >-
+      (github.event_name == 'schedule' && vars.RAM_SCHEDULED_FUZZ == 'true') ||
+      (github.event_name == 'workflow_dispatch' && inputs.long_campaign)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - digest_auth_params
+          - uri_path
+          - range_if_range
+          - webdav_xml
+          - destination_host_prefix
+          - log_format
+          - zip_entry_name
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned nightly toolchain
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+        with:
+          toolchain: nightly-2026-07-22
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: fuzz-long-${{ matrix.target }}
+          workspaces: fuzz
+      - name: Install pinned cargo-fuzz
+        run: cargo install --locked cargo-fuzz --version 0.13.2
+      - name: Verify locked fuzz dependency graph
+        run: cargo +"${FUZZ_NIGHTLY}" check --manifest-path fuzz/Cargo.toml --locked
+      - name: Run bounded long campaign
+        run: |
+          set -euo pipefail
+          seed_dir="fuzz/corpus/${{ matrix.target }}"
+          corpus_dir="target/fuzz-corpus/${{ matrix.target }}"
+          test -n "$(find "$seed_dir" -maxdepth 1 -type f -print -quit)"
+          rm -rf "$corpus_dir"
+          mkdir -p "$corpus_dir"
+          cp -a "$seed_dir/." "$corpus_dir/"
+          mkdir -p "fuzz/artifacts/${{ matrix.target }}"
+          cargo +"${FUZZ_NIGHTLY}" fuzz run "${{ matrix.target }}" \
+            "$corpus_dir" -- \
+            -max_total_time=1800 \
+            -max_len=65536 \
+            -timeout=10 \
+            -rss_limit_mb=2048 \
+            -artifact_prefix="fuzz/artifacts/${{ matrix.target }}/"
+      - name: Upload campaign artifacts
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-long-${{ matrix.target }}-${{ github.sha }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore
+          retention-days: 30

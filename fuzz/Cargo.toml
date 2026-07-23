@@ -1,0 +1,65 @@
+[package]
+name = "ram-fileserver-fuzz"
+version = "0.0.0"
+publish = false
+license = "MIT"
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+ram-fileserver = { path = "..", default-features = false, features = ["fuzzing"] }
+
+[[bin]]
+name = "digest_auth_params"
+path = "fuzz_targets/digest_auth_params.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "uri_path"
+path = "fuzz_targets/uri_path.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "range_if_range"
+path = "fuzz_targets/range_if_range.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "webdav_xml"
+path = "fuzz_targets/webdav_xml.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "destination_host_prefix"
+path = "fuzz_targets/destination_host_prefix.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "log_format"
+path = "fuzz_targets/log_format.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "zip_entry_name"
+path = "fuzz_targets/zip_entry_name.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

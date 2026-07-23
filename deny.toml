@@ -1,0 +1,61 @@
+[graph]
+all-features = true
+
+[advisories]
+yanked = "deny"
+ignore = []
+
+[licenses]
+confidence-threshold = 0.8
+# Ram 项目自身仅使用 MIT；这是获准第三方 Rust 依赖许可证的唯一事实来源。scripts/check-license-policy.py 要求 cargo-about
+# 优先级列表是此列表精确且有序的镜像。
+# Ram itself is MIT-only. This is the single source of truth for accepted third-party Rust dependency licenses.
+# scripts/check-license-policy.py requires cargo-about's list to be an exact ordered mirror.
+#
+# MIT-0 是带明确担保免责声明且无需署名的标准宽松许可证，故予接受。Unlicense 的公有领域
+# 奉献在不同司法辖区可能有不同解释，故有意不接受；当前每个使用项也提供获准 MIT 选项。
+# MIT-0 is accepted as a standard permissive license with an explicit warranty disclaimer and no
+# attribution requirement. Unlicense is intentionally rejected because public-domain dedication may
+# vary by jurisdiction; every current occurrence also offers an accepted MIT alternative.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "Unicode-3.0",
+    "Zlib",
+]
+
+[bans]
+multiple-versions = "deny"
+multiple-versions-include-dev = false
+wildcards = "allow"
+highlight = "all"
+# 精确的低版本例外使每个新引入重复版本仍为致命错误。稳定版 argon2 与 headers 汇聚到 0.11
+# 栈时重新审查 RustCrypto 0.10 项；目前二者尚无对齐的稳定发布。
+# Exact lower-version exceptions keep newly introduced duplicates fatal. Revisit RustCrypto 0.10 when
+# stable argon2 and headers converge on 0.11; neither currently has an aligned stable release.
+skip = [
+    { crate = "block-buffer@0.10.4", reason = "argon2 0.5.3 and headers 0.4.1 still require digest 0.10" },
+    { crate = "cpufeatures@0.2.17", reason = "argon2 0.5.3 and headers 0.4.1 have not moved to cpufeatures 0.3" },
+    { crate = "crypto-common@0.1.7", reason = "argon2 0.5.3 and headers 0.4.1 still require digest 0.10" },
+    { crate = "digest@0.10.7", reason = "argon2 0.5.3 and headers 0.4.1 still require the RustCrypto 0.10 API" },
+    { crate = "getrandom@0.2.17", reason = "digest_auth test feature unification activates 0.2; release normal/build graphs exclude it" },
+    { crate = "password-hash@0.5.0", reason = "latest stable argon2 0.5.3 still requires password-hash 0.5 while sha-crypt uses 0.6" },
+    { crate = "rand_core@0.6.4", reason = "argon2 0.5.3 still reaches rand_core 0.6 while uuid fast-rng uses rand_core 0.10" },
+    # serde_derive 1.0.229 已采用 syn 3；Tokio/Futures/ICU/rstest/smart-default 的最新稳定版
+    # 仍使用 syn 2。两者都只在编译期执行，精确版本例外会在任一侧再次升级时强制复核。
+    # serde_derive 1.0.229 has adopted syn 3, while the latest stable
+    # Tokio/Futures/ICU/rstest/smart-default releases still use syn 2. Both are compile-time-only;
+    # this exact exception forces another review when either side moves again.
+    { crate = "syn@2.0.119", reason = "latest stable macro ecosystem has not yet converged with serde_derive on syn 3" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

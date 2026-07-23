@@ -1,0 +1,418 @@
+# Ram 配置示例；编辑前请复制到 `/etc/ram/config.yaml`。
+# Example Ram configuration. Copy this file to `/etc/ram/config.yaml` before editing.
+#
+# 必须使用 `ram --config /etc/ram/config.yaml`（或 `RAM_CONFIG`）显式选择此文件。若两者均未
+# 设置，Ram 不会加载 YAML，也不会扫描进程工作目录或可执行文件所在目录。可用下方命令在
+# 不启动监听器或修改运行状态的情况下验证；成功结果必须是 stdout 精确输出
+# `Configuration OK` 且退出码为 0：
+# Select this file explicitly with `ram --config /etc/ram/config.yaml` (or
+# `RAM_CONFIG`). Without either selector, Ram loads no YAML and scans neither
+# the process working directory nor the executable directory. Validate this
+# file without starting listeners or mutating runtime state with:
+#   ram --check-config --config /etc/ram/config.yaml
+# Success is exactly `Configuration OK` on stdout with exit status 0.
+#
+# 此文件是安全模板，并非可直接运行的配置：它只绑定回环地址；占位密码 `change-me` 会被 ram
+# 拒绝，使用前须换成真实密码、Argon2id PHC 或旧式 `$6$` SHA-512-crypt 哈希；所有特权能力
+# 默认关闭。
+# This file is a SAFE TEMPLATE, not a ready-to-run config:
+#   * It binds to loopback only.
+#   * It ships the placeholder password `change-me`, which ram REFUSES to
+#     start with. Replace it with a real password, Argon2id PHC, or a legacy
+#     `$6$` SHA-512-crypt hash
+#     before use.
+#   * Every privileged capability is left off.
+#
+# 此 YAML 中每个相对路径均相对此文件目录解析；CLI/环境路径（含 --config）相对进程 cwd。
+# Every relative path inside this YAML is resolved against THIS file's
+# directory. CLI/environment paths, including --config, use the process cwd.
+
+serve-path: ./data
+# 启动隔离执行稳定双遍扫描并保留完整 fd 链和每个规范祖先身份（st_dev/st_ino/type），而非
+# 信任字符串前缀。配置、TLS/认证/令牌输入、撤销状态/锁、日志和配额钩子必须同时位于
+# serve-path 与未认证 custom-assets 根之外。消费者从保留描述符读取输入/服务根，同名命名空间
+# 后续替换无法重定向。输出保留固定父 fd 与基名；日志轮转和撤销 I/O 均相对该描述符。
+# 任一敏感输入不得与可变输出共享 inode；撤销状态/锁、日志本体及 `.1`–`.5`
+# 轮转槽和 pathname listener 彼此也不得占用同一父目录+基名槽。
+# Startup isolation performs stable double walks and retains the complete fd
+# chain plus each canonical ancestor identity (st_dev/st_ino/type), rather than
+# trusting string prefixes. Config, TLS/auth/token inputs, revocation
+# state/lock, logs and quota hooks must stay outside both serve-path and the
+# unauthenticated custom-assets root. Consumers read inputs and serve roots
+# from those retained descriptors; a later same-spelled namespace replacement
+# cannot redirect them. Outputs retain a pinned parent fd plus basename; log
+# rotation and revocation I/O remain relative to it.
+# No sensitive input may share an inode with a mutable output. Revocation
+# state/lock, the active log and `.1`–`.5` rotation slots, and pathname listeners
+# must also occupy distinct parent-directory-plus-basename namespace slots.
+#
+# serve-path/assets 下的请求遍历始终使用 RESOLVE_NO_XDEV，因此根下子挂载/绑定挂载不可达，
+# 此版本没有跨挂载兼容开关。本挂载命名空间可检测解析到服务对象的已配置绑定别名；其他
+# 命名空间别名或之后特权挂载变更不在快照内。保持挂载拓扑固定，且不要授予服务挂载能力。
+# NFS/FUSE inode 稳定性和阻塞行为不属于可信本地文件系统基线。
+# Request traversal below serve-path/assets always uses RESOLVE_NO_XDEV.
+# Submounts and bind mounts below either root are therefore unreachable, and
+# this version has no cross-mount compatibility switch. A configured bind alias
+# that resolves to the served object is detected in this mount namespace, but
+# aliases in another namespace or later privileged mount changes are outside
+# the snapshot. Keep mount topology fixed and do not grant the service mount
+# capabilities. NFS/FUSE inode stability and blocking behavior are not part of
+# the trusted local-filesystem baseline.
+bind:
+  - 127.0.0.1
+port: 5000
+
+# 路径名 Unix 套接字在日志器/运行时启动前绑定，在临时 umask 0177 下以 0600 创建，再通过固定
+# inode 改成下方确切值。其父目录必须安全且由 root/服务所有，套接字也须位于服务根/自定义
+# 资源之外。YAML 中八进制模式须加引号；每个路径组件必须是真实目录而非符号链接（`/var/run`
+# 别名应写作 `/run`）。相对 YAML 套接字路径相对此配置目录解析。UID/GID 可选；共享 sticky
+# 父目录无法安全地把套接字 chown 给 root/当前服务 euid 以外的 UID。
+# A pathname Unix socket is bound before the logger/runtime start, is born
+# 0600 under a temporary umask 0177, and is then changed to these exact values
+# through its pinned inode. Its parent must be root/service-owned and safe, and
+# the socket must stay outside serve-path/custom assets. Quote octal modes in
+# YAML. Every pathname component must be a real directory, not a symlink
+# (`/var/run` aliases must be written as `/run`). Relative YAML socket paths
+# resolve from this configuration file's directory. UID/GID are optional; a
+# shared sticky parent cannot safely chown the
+# socket to a UID other than root/current service euid.
+unix-socket-mode: '0600'
+# unix-socket-uid: 1000
+# unix-socket-gid: 1000
+# Linux 抽象套接字没有路径权限边界，除非显式启用危险开关，否则拒绝。
+# Linux abstract sockets have no pathname permission boundary and are rejected
+# unless this dangerous opt-in is explicitly enabled.
+allow-abstract-unix-socket: false
+
+# 转发请求头默认关闭。仅当直连 TCP 对端是受控反向代理时同时配置两个字段。不可信对端不能
+# 影响或拆分按来源计费的认证/请求/上传限制。
+# Forwarding headers are disabled by default. Configure BOTH fields only when
+# the direct TCP peer is a controlled reverse proxy. Untrusted peers cannot
+# influence or split source-keyed authentication/request/upload limits.
+# trusted-proxy:
+#   - 127.0.0.1/32
+#   - '::1/128'
+# trusted-proxy-header: x-forwarded-for # 或 x-real-ip / or x-real-ip
+
+# 非回环 TCP 监听器要求 tls-cert/tls-key。不得仅为绕过启动检查启用不安全 HTTP，因为会明文
+# 发送可复用凭据。
+# Non-loopback TCP listeners require tls-cert/tls-key. Never enable this merely
+# to suppress the startup check; it sends reusable credentials in cleartext.
+allow-insecure-http: false
+# HSTS 有意默认关闭。Ram 直接 TLS 监听器可取消注释秒数 max-age（0 清除旧策略，硬上限两年）；
+# 终止 TLS 的反向代理必须自行设置 HSTS。
+# HSTS is intentionally off. For Ram's own direct TLS listener, uncomment a
+# max-age in seconds (0 clears an old policy; hard maximum is two years).
+# A TLS-terminating reverse proxy must set HSTS itself instead.
+# hsts-max-age: 31536000
+# 明文 TCP/Unix 监听器默认只用 HTTP/1。仅对可信、先验知识 HTTP/2（h2c）客户端启用；TLS H2
+# 使用 ALPN，无需此开关。
+# Plaintext TCP/Unix listeners are HTTP/1-only by default. Enable this only
+# for trusted prior-knowledge HTTP/2 (h2c) clients; TLS HTTP/2 uses ALPN and
+# does not require this switch.
+allow-h2c: false
+# 除非显式启用此风险开关，否则拒绝服务 `/`。
+# Serving `/` is refused unless this explicit risk switch is enabled.
+allow-filesystem-root: false
+# 上传与 render-* 在同一源共享浏览器凭据；保持关闭。
+# Uploads and render-* share browser credentials on one origin; keep disabled.
+allow-active-content-risk: false
+
+# 生产环境删除内联 `auth` 块，改用私有 `auth-file` 每行一条规则。systemd 可配置
+# `LoadCredential=ram-auth:...` 和 `ExecStart=... --auth-file=%d/ram-auth`；两来源互斥。
+# 本地评估也必须替换 `change-me`。Basic 支持 Argon2id v19 PHC（m=19456..65536 KiB、t=2..5、
+# p=1..4）及旧式 `$6$` SHA-512-crypt（最多 1,000,000 轮）。所有 Argon2id 账户须使用同一
+# m/t/p/输出 profile，所有 SHA-512-crypt 账户须使用同一 rounds；Argon2id 不能与明文/SHA
+# 混用。要么一次迁移全部账户，要么使用独立实例。
+# Digest 要求明文，密码哈希配置绝不声明 Digest。
+# Production: remove the inline `auth` block and use one rule per line in a
+# private `auth-file`. With systemd, configure `LoadCredential=ram-auth:...`
+# and `ExecStart=... --auth-file=%d/ram-auth`. The two sources are exclusive.
+# Replace `change-me` below for local evaluation; ram refuses to start with it.
+# Basic supports Argon2id v19 PHC (m=19456..65536 KiB, t=2..5, p=1..4)
+# and legacy `$6$` SHA-512-crypt (maximum 1,000,000 rounds). Argon2id accounts
+# must all use one m/t/p/output profile, and SHA-512-crypt accounts one rounds
+# value; Argon2id cannot mix with plaintext/SHA. Migrate all accounts at once
+# or use a separate instance. Digest requires
+# plaintext and is never advertised for a password-hash configuration.
+auth:
+  - admin:change-me@/:rw
+# 空行/缩进注释会被忽略；真实规则不得含首尾空白，因为 Ram 从不悄然修剪凭据字节。
+# Blank/indented-comment lines are ignored; real rules must not have leading or
+# trailing whitespace because Ram never silently trims credential bytes.
+# auth-file: /run/credentials/ram.service/ram-auth
+
+token-ttl: 15m
+
+# 默认令牌秘密和 audience 每进程随机，重启会使未到期 Bearer 令牌失效。若需跨重启稳定，必须
+# 同时配置两值。秘密文件至少 32 字节，由 root/服务账户所有且模式精确为 0400/0600。撤销文件
+# 默认位于同级 `<secret-file>.revocations.json`，也可显式指定；稳定同级 `.lock` 串行化共享/
+# 独占事务，在文件系统可靠支持 flock、原子 rename 和目录 fsync 时，多本地 Ram 进程可共享。
+# 状态文件读取上限 8 MiB，运行时 I/O 歧义关闭失败。
+# By default, token secret and audience are process-random, so restart
+# invalidates outstanding bearer tokens. For restart-stable tokens configure
+# BOTH values. The secret file must contain at least 32 bytes, be owned by root
+# or the service account, and use exactly mode 0400 or 0600. Revocations then
+# default to the sibling `<secret-file>.revocations.json`, or can be placed
+# explicitly as below. A stable sibling `.lock` serializes shared/exclusive
+# transactions, so multiple local Ram processes may share the state when the
+# filesystem provides reliable flock, atomic rename, and directory fsync. The
+# state file has an 8 MiB read limit and runtime I/O ambiguity fails closed.
+# token-secret-file: /etc/ram/token.secret
+# token-audience: files-production
+# token-revocation-file: /var/lib/ram/token-revocations.json
+
+# 各资源预算相互独立：普通连接若不通过昂贵任务信号量，不能放大递归扫描/哈希/归档工作。
+# 大小使用二进制后缀，时长接受 s/m/h/d。
+# Resource budgets are independent: ordinary connections cannot multiply
+# recursive scans/hash/archive work without also passing the expensive-task
+# semaphore. Sizes use binary suffixes; durations accept s/m/h/d.
+max-connections: 512
+# 此上限为进程级，流式响应到达 EOS 或客户端断开前持续占用。
+# This limit is process-wide and remains occupied until a streaming response
+# reaches end-of-stream or the client disconnects.
+max-concurrent-requests: 64
+# 按来源准入在全局队列前立即返回 429；认证成功后再应用按账户 429 限制。有效键值不能超过全局上限。
+# Per-source admission is an immediate 429 before the global queue; successful
+# authentication is followed by the per-account 429 limit. Effective keyed
+# values cannot exceed the global limit.
+max-concurrent-requests-per-source: 16
+max-concurrent-requests-per-user: 16
+# 最多这些请求可等待全局槽；队列满或等待超时返回 503。零只关闭等待，不关闭服务。
+# At most this many requests may wait for the global slot. A full queue or a
+# timed-out waiter returns 503. Zero disables waiting without disabling service.
+max-request-queue: 64
+request-queue-timeout: 5s
+# 分别设置 HTTP/1 请求头/初始 h2 preface 绝对截止时间、传输空闲截止时间和已接受连接硬生命周期。
+# 写空闲值既用于等待中的套接字写，也独立用于每个响应/H2 流；活跃流不能让另一个流控停滞流存活。
+# Absolute HTTP/1 head / initial h2 preface deadline, transport-idle deadline,
+# and hard accepted-connection lifetime. The write-idle value is enforced both
+# on pending socket writes and independently for each response/H2 stream; an
+# active stream cannot keep another flow-control-stalled stream alive.
+header-read-timeout: 30s
+connection-idle-timeout: 60s
+connection-max-lifetime: 1h
+response-write-idle-timeout: 30s
+# 每连接有效值还受 max-concurrent-requests 限制。
+# The effective per-connection value is also capped by
+# max-concurrent-requests.
+h2-max-concurrent-streams: 32
+# Tokio 阻塞工作线程的进程级硬上限，含文件系统、密码哈希和持久 token 撤销查询/写入。
+# Tokio 无法中断困在单次内核调用中的线程；请求截止时间可能先返回，但线程真实退出前仍持有
+# permit。密码哈希或持久撤销后端至少需要 5 个（四个昂贵认证 worker 加一个普通文件系统 worker）；
+# 只配置 persistent token secret 时自动派生的默认撤销后端也会在启动和 --check-config 中计入。
+# Hard process-wide ceiling for Tokio blocking workers, including filesystem, password hashing,
+# and persistent token-revocation reads/writes. Tokio cannot interrupt a worker stuck in one kernel
+# call; it retains its permit after the request deadline until real exit. Password hashing or a
+# persistent revocation backend requires at least five (four expensive-auth workers plus one regular
+# filesystem worker). A default backend derived from a persistent token secret is counted by both
+# startup and --check-config.
+# 短文件系统任务还在提交 spawn_blocking 前共享同一准入（服务根和自定义资源根不分别计数）；
+# 等待使用 request-queue-timeout。文件流只在每次 metadata/read/seek 期间持有许可，慢客户端
+# 等待网络时不占用许可；取消已提交 I/O 后，真实闭包仍持有许可直到返回。
+# Short filesystem jobs also share one served/assets admission before spawn_blocking, using
+# request-queue-timeout for the wait. Streams hold a permit only during each metadata/read/seek,
+# not while waiting on a slow network; cancelled submitted I/O retains it until real closure return.
+max-blocking-threads: 32
+# 目录/搜索/归档/哈希与 PUT/PATCH/COPY 本地发布工作线程共享准入；饱和时新本地变更返回 503。
+# Shared admission for directory/search/archive/hash work and PUT/PATCH/COPY
+# local publication workers. Saturation fails new local mutations with 503.
+max-expensive-tasks: 4
+max-walk-entries: 1000000
+max-walk-depth: 64
+max-search-results: 10000
+max-directory-entries: 10000
+# 小型主机可调低 WebDAV 预算，但启动会拒绝超过内置 64 属性、65,536 渲染属性及 8 MiB 上限。
+# WebDAV budgets may be lowered for smaller hosts, but startup rejects values
+# above the built-in 64-property, 65,536 rendered-property and 8 MiB ceilings.
+max-webdav-properties: 64
+max-webdav-rendered-properties: 65536
+max-webdav-response-size: 8M
+# 流式 ZIP 同时按“每个条目的剩余预算 + 增长哨兵”未压缩上限和 Deflate 保守膨胀上限
+# 预声明 ZIP64；因此自定义的低于 4 GiB 预算也不会因压缩输出略大而在 200 响应后失败。
+# Streaming ZIP predeclares ZIP64 from both the remaining-budget-plus-growth-sentinel input ceiling
+# and a conservative Deflate expansion ceiling, so even custom budgets below 4 GiB cannot fail after
+# a 200 response merely because compressed output is slightly larger.
+max-archive-size: 4G
+max-hash-size: 4G
+expensive-task-timeout: 5m
+# PUT/PATCH/COPY 本地重建/发布的协作式截止时间，在系统调用/数据块之间检查；不是 NFS/FUSE
+# 单次系统调用的硬超时。
+# Cooperative deadline for PUT/PATCH/COPY local rebuild/publication. It is
+# checked between syscalls/chunks and is not a hard NFS/FUSE syscall timeout.
+copy-timeout: 5m
+upload-idle-timeout: 30s
+upload-total-timeout: 15m
+# 上传请求体在不持有变更事务锁时暂存；暂存并发和最终提交锁等待独立有界。
+# Upload bodies are staged without holding the mutation transaction lock.
+# Staging concurrency and final commit-lock wait are bounded independently.
+max-concurrent-uploads: 4
+# 每身份值均受全局上传上限约束。全局耗尽返回 503，用户/来源耗尽返回 429。来源与日志、请求/
+# 认证准入使用同一已验证 TCP/代理 IP；Unix 日志保留 SO_PEERCRED uid/gid/pid，安全分桶按 UID
+# 聚合，防止 fork/PID 变化拆分预算。
+# Per-identity values are each capped by the global upload limit. Global
+# exhaustion returns 503; user/source exhaustion returns 429. Source is the
+# same verified TCP/proxy IP used in logs and request/authentication admission.
+# Unix logs retain SO_PEERCRED uid/gid/pid while security buckets group by UID,
+# preventing fork/PID churn from splitting a budget.
+max-concurrent-uploads-per-user: 2
+max-concurrent-uploads-per-source: 2
+# 启动/周期清理只识别精确小写连字符 UUID 候选名，并要求普通、服务所有、0600、单硬链接文件
+# 和非阻塞独占 flock。绝不删除符号链接/活跃上传。不完整启动扫描令可写启动失败；之后不完整
+# 扫描会粘性禁止新候选，直到修正并重启。
+# Startup and periodic cleanup recognize only exact lowercase hyphenated UUID
+# candidate names, then require a regular service-owned 0600 single-link file
+# and a nonblocking exclusive flock. Symlinks and active uploads are never
+# removed. An incomplete scan makes writable startup fail; an incomplete later
+# scan stickily disables new candidates until a corrected restart.
+stale-upload-cleanup-age: 24h
+stale-upload-cleanup-max-entries: 100000
+stale-upload-cleanup-max-depth: 64
+stale-upload-cleanup-max-deletions: 1000
+# 截止时间在文件系统调用之间协作检查；卡住的 NFS/FUSE 调用可超过它。接受范围 1s..60s。
+# Cooperative between filesystem calls: a stuck NFS/FUSE syscall can exceed
+# this deadline. Accepted range is 1s..60s.
+stale-upload-cleanup-timeout: 5s
+write-lock-timeout: 5s
+
+# 这些 HTTP 策略上限不是文件系统或按用户配额。显式零只关闭 max-upload-size；max-copy-size
+# 必须保持非零。
+# These HTTP policy limits are not a filesystem or per-user quota. An explicit
+# zero disables only max-upload-size; max-copy-size must remain nonzero.
+max-upload-size: 4G
+max-copy-size: 4G
+# 精确普通权限位（八进制字符串）；固定描述符 chmod 使其不受服务 umask 影响。upload-dir-mode
+# 必须包含所有者 rwx（0700），因为 Ram 拥有且必须列出/遍历/更新其创建的每个目录。覆盖型
+# PUT/PATCH 和 COPY 只保留普通 0777 位。
+# Exact ordinary permission bits (octal strings); descriptor-pinned chmod makes
+# them independent of the service umask. upload-dir-mode must include owner rwx
+# (0700), because Ram owns and must list/traverse/update every directory it
+# creates. Overwrite PUT/PATCH and COPY preserve only ordinary 0777 bits.
+upload-file-mode: '0600'
+upload-dir-mode: '0700'
+
+# 可选 statvfs 预检只是存在竞态的容量提示：其他写入者可立即耗尽空间，权威 ENOSPC/EDQUOT
+# 仍会处理；reserve 是预留空闲空间。生产 XFS 树应以 `prjquota` 挂载，为整个 serve-path
+# 分配继承 project ID（`xfs_quota project -s`）并设置项目块/inode 硬上限。上传/暂存候选在
+# rename 前继承并消耗配额，需为旧文件与候选共存留余量。内核 EDQUOT 是权威结果；运行 `du`
+# 的钩子不能替代，因为扫描与发布并非原子事务。可复制命令见 README 10.4。
+# Optional statvfs preflight. This is a race-prone capacity hint only: another
+# writer can consume space immediately afterwards, and authoritative
+# ENOSPC/EDQUOT errors are still handled. Reserve is free space kept aside.
+# For a production XFS tree, mount its filesystem with `prjquota`, assign the
+# entire serve-path an inherited project ID (`xfs_quota project -s`), and set
+# project block/inode hard limits. Upload/staging candidates then inherit and
+# consume that quota before rename; keep headroom for old+candidate coexistence.
+# Kernel EDQUOT is authoritative. A quota hook that runs `du` is not a safe
+# substitute because the scan and publication are not one atomic transaction.
+# README section 10.4 contains copyable /etc/projects, /etc/projid and
+# xfs_quota commands.
+storage-space-check: false
+storage-reserve: 0
+
+# 可选可信配额/核算程序在 PUT/PATCH 请求体暂存后、发布前运行。应置于 serve-path 外可信且
+# 不可写目录；它以 ram 服务 uid 执行，拥有任意代码权限。文件须为普通、单硬链接、可执行、
+# root/服务所有且组/全局不可写。退出 0 允许；非零以 507 拒绝（保留辅助基础设施退出码 125）；
+# 执行超时返回 504。环境和标准流均清空。固定 inode 以 /proc/self/fd/N 执行，钩子不得用
+# $0 定位同级文件，也不得 daemonize 或主动逃离其进程组；否则服务器无法保证取消时回收后代。
+# Optional trusted quota/accounting executable, run after PUT/PATCH body
+# staging and before publication. Keep it outside serve-path in a trusted,
+# non-writable directory; it executes as the ram service uid with arbitrary
+# code privileges. The file must be regular, single-link, executable,
+# root/service-owned and not group/world writable. Exit 0 allows; nonzero
+# denies with 507 except reserved helper-infrastructure exit 125; execution
+# timeout returns 504. Environment and stdio are cleared. The pinned inode is executed
+# as /proc/self/fd/N, so the hook must not use $0 to locate sibling files. It
+# must not daemonize or deliberately escape its process group; otherwise Ram
+# cannot guarantee descendant cleanup on cancellation.
+# storage-quota-hook: /usr/local/libexec/ram-storage-quota
+storage-quota-hook-timeout: 5s
+
+# 特权能力均需显式启用。开启上传/删除会使服务树成为独占写入者边界：只运行一个可写 Ram
+# 实例，Ram 运行时绝不由其他进程修改该树。进程内事务锁无法封闭与外部写入者之间最终
+# statat-to-renameat/unlinkat 竞态。YAML allow-all 先应用，每个显式 allow-* 覆盖它；CLI/环境
+# 聚合值为下一层，再由 CLI/环境字段值覆盖。每个 CLI 布尔值接受 `--flag=false`。
+# Privileged capabilities are opt-in. Enabling upload/delete makes the served
+# tree an exclusive-writer boundary: run exactly one writable Ram instance and
+# never mutate that tree from another process while Ram is running. Process-
+# local transaction locks cannot close the final statat-to-renameat/unlinkat
+# race against external writers. YAML allow-all is applied first and each
+# explicit allow-* value overrides it. CLI/env aggregate is the next layer,
+# followed by CLI/env specific values. Every CLI bool accepts `--flag=false`.
+allow-all: false
+allow-upload: false
+allow-delete: false
+allow-search: false
+allow-symlink: false
+allow-archive: false
+allow-hash: false
+
+# CORS 默认关闭且绝不允许浏览器凭据。需要时优先精确 origin 而非通配符。方法与目标/全局资源
+# 能力取交集；请求头不区分大小写匹配，且绝不反射显式允许列表外值。
+# CORS is disabled by default and never permits browser credentials. If it is
+# required, prefer exact origins over the wildcard. Methods are intersected
+# with the target/global resource capability; request headers are matched
+# case-insensitively and never reflected outside this explicit allowlist.
+enable-cors: false
+cors-origins:
+  - '*'
+cors-methods:
+  - GET
+  - HEAD
+  - OPTIONS
+  - PUT
+  - DELETE
+  - PATCH
+  - PROPFIND
+  - PROPPATCH
+  - MKCOL
+  - COPY
+  - MOVE
+  - CHECKAUTH
+  - LOGOUT
+cors-headers:
+  - authorization
+  - content-type
+  - range
+  - x-update-range
+  # 目录 UI 的 DELETE/MOVE 乐观快照条件。
+  # Directory UI DELETE/MOVE optimistic snapshot condition.
+  # 该进程内保护仅在 Ram 是服务根唯一写入者时有效；其他进程直接写文件系统不会推进纪元。
+  # This process-local protection is valid only when Ram is the served root's sole writer;
+  # other processes writing the filesystem directly do not advance Ram's epoch.
+  - x-ram-if-mutation-version
+  - destination
+  - depth
+  - overwrite
+  - if-match
+  - if-none-match
+  - if-modified-since
+  - if-unmodified-since
+  - if-range
+
+render-index: false
+render-try-index: false
+render-spa: false
+
+# 自定义资源在认证前执行。树中每个目录/文件须由可信主体所有且组/全局不可写；被服务文件须
+# 为普通单硬链接文件。该树也必须在任何网络可写服务树之外。自定义 index.html 上限 1 MiB。
+# Custom assets execute before authentication. Every directory/file in the
+# tree must have a trusted owner and must not be group/world writable; served
+# files must be regular, single-link files. The tree must also remain outside
+# any network-writable served tree. Custom index.html is limited to 1 MiB.
+# assets: /opt/ram/assets
+
+log-format: '$time_iso8601 $log_level request_id=$request_id - $remote_addr $remote_user "$request" $status bytes=$body_bytes outcome=$response_outcome request_time=$request_time'
+# 日志目标须由 root/服务用户所有且为普通文件；ram 拒绝符号链接/设备，并对新旧文件强制
+# 0600。访问记录在响应体 EOF/错误/Drop 时发送，而非构造响应头时。`$body_bytes` 统计交给
+# Hyper 的 frame；`$response_outcome` 暴露 complete/error/truncated/client-cancel 结果。
+# Log targets must be owned by root/the service user and be regular files; ram
+# rejects symlinks/devices and enforces mode 0600 on new and existing files.
+# Access records are emitted at response-body EOF/error/drop, not when the
+# response head is constructed. `$body_bytes` counts frames handed to Hyper;
+# `$response_outcome` exposes complete/error/truncated/client-cancel outcomes.
+# 关停 flush 只有 2 秒总 deadline；目标 I/O 卡死时可能丢失队尾日志，但不能无限阻塞退出。
+# Shutdown flush has one two-second total deadline; stuck destination I/O may lose tail records but
+# cannot block process exit indefinitely.
+# log-file: /var/log/ram/access.log
+compress: low

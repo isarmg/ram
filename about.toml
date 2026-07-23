@@ -1,0 +1,25 @@
+# Ram 项目自身仅使用 MIT；本列表只描述两个 Linux 发布目标可进入制品的第三方 Rust 依赖许可证。
+# deny.toml `[licenses].allow` 的有序镜像；后者是策略事实来源。不得单独修改此列表；
+# scripts/check-license-policy.py 会强制成员和优先级顺序完全一致。依赖无法解析到这些 SPDX
+# 许可证之一时，cargo-about 关闭失败。
+# Ram itself is MIT-only; this list covers third-party Rust dependencies for both Linux release targets.
+# Ordered mirror of deny.toml `[licenses].allow`, the policy source of truth. Do not edit this list
+# independently; scripts/check-license-policy.py enforces exact membership/order. cargo-about fails
+# closed when a dependency cannot be resolved to one of these SPDX licenses.
+accepted = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "Unicode-3.0",
+    "Zlib",
+]
+
+# 发布归档包含可执行文件；运行时和构建依赖都可能贡献代码，因此均保留在报告中。
+# Release archives contain the executable. Runtime and build dependencies stay included because both
+# may contribute code to it.
+ignore-dev-dependencies = true
