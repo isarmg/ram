@@ -1,12 +1,14 @@
 /**
- * 目录页操作与浏览器上传编排。模块把认证合并、小文件 token 下载、
- * 目录遍历预算和上传状态机收敛在一处。服务端仍是授权与路径安全的权威；
- * 这里的检查用于在发起昂贵请求前给用户快速、确定的反馈。
+ * 目录页操作与浏览器上传编排。模块把认证合并、目录遍历预算和上传状态机收敛在一处。
+ * 服务端仍是授权与路径安全的权威；这里的检查用于在发起昂贵请求前给用户快速、确定的反馈。
+ * 文件下载使用普通同源认证链接，由浏览器原生流式写盘，不在 JavaScript 中缓冲整个文件。
  *
  * Directory-page operations and browser upload orchestration. Authentication
- * coalescing, bounded token downloads, traversal budgets, and upload state are
- * centralized here. The server remains authoritative for authorization and
- * path safety; client checks provide early deterministic feedback.
+ * coalescing, traversal budgets, and upload state are centralized here. The
+ * server remains authoritative for authorization and path safety; client checks
+ * provide early deterministic feedback. File downloads use ordinary same-origin
+ * authenticated links streamed natively by the browser, never buffered whole in
+ * JavaScript.
  */
 
 import {
@@ -14,9 +16,7 @@ import {
   assertResponseOk,
   checkAuthentication,
   createDirectory,
-  createEmptyFile,
   deleteResource,
-  downloadWithToken,
   logOut,
   MAX_API_ERROR_BODY_BYTES,
   moveResource,
@@ -30,7 +30,6 @@ import { errorMessage, requireElement, resourceUrl } from "./ui-state.js";
 
 const MAX_CONCURRENT_UPLOADS = 2;
 const MAX_SUBPATHS_COUNT = 1000;
-export const MAX_BROWSER_TOKEN_DOWNLOAD_BYTES = 16 * 1024 * 1024;
 export const MAX_UPLOAD_ROWS = 1000;
 export const MAX_UPLOAD_TREE_DEPTH = 32;
 export const MAX_UPLOAD_TREE_ENTRIES = 1000;
@@ -45,7 +44,6 @@ export const UPLOAD_TRAVERSAL_TOTAL_TIMEOUT_MS = 2 * 60 * 1000;
 
 /** @type {Promise<string> | null} */
 let authenticationPromise = null;
-let tokenDownloadActive = false;
 let activeUploadTraversals = 0;
 // 中文：FileSystemEntry 没有取消原语。Promise 超时后 UI 不再视为 pending，
 // 但在浏览器真正回调前仍须阻止下一次枚举，避免逐次超时积累不可释放闭包。
@@ -53,24 +51,6 @@ let activeUploadTraversals = 0;
 // no longer counts as pending UI work, but a new traversal remains blocked until
 // the browser actually calls back so repeated timeouts cannot retain closures.
 let unresolvedUploadTraversalCallbacks = 0;
-
-/**
- * 只有安全整数且已知不超过上限的大小才可启用 JS 内存下载。
- * XFS 等文件系统允许大于 2^53 的稀疏文件；这些值可以近似显示，
- * 但精度不足以支撑“小文件”的缓冲决策，必须交给浏览器原生流式下载。
- *
- * Enable an in-memory JavaScript download only for a safe-integer size known
- * to be within the budget. Filesystems such as XFS permit sparse files above
- * 2^53; those values may be displayed approximately, but lack the precision
- * needed for a "small file" buffering decision and must stream natively.
- *
- * @param {number} size
- */
-export function browserTokenDownloadLimit(size) {
-  return Number.isSafeInteger(size) && size >= 0 && size <= MAX_BROWSER_TOKEN_DOWNLOAD_BYTES
-    ? MAX_BROWSER_TOKEN_DOWNLOAD_BYTES
-    : undefined;
-}
 
 /** @param {string} value */
 export function isSafePathSegment(value) {
@@ -117,15 +97,12 @@ export function validateMovePath(value) {
 
 /**
  * 列表操作必须基于服务端签发的稳定扫描版本；令牌缺失说明扫描与变更重叠，安全做法是
- * 要求刷新。本函数只为 Index 返回 mutation token；Edit 的调用方必须独立传入其已获取的
- * 强源 ETag，API 层会确保两类条件头互斥，View 则没有危险操作。
+ * 要求刷新。本函数只为 Index 返回 mutation token；View 没有危险操作。
  *
  * Listing actions must use the server-signed stable-scan version. A missing
  * token means the scan overlapped a mutation, so refresh rather than silently
  * degrading to an unconditional destructive request. This function returns a
- * mutation token only for Index. An Edit caller separately supplies its strong
- * source ETag, the API layer keeps both condition types mutually exclusive,
- * and View exposes no destructive action.
+ * mutation token only for Index; View exposes no destructive action.
  *
  * @param {import("./ui-state.js").AppContext} context
  */
@@ -454,7 +431,6 @@ export async function setupIndexPage(context) {
     const download = requireElement(".download", HTMLAnchorElement);
     download.href = `${resourceUrl()}?zip`;
     download.title = "Download folder as a .zip file";
-    download.classList.add("dlwt");
     // 中文：目录 ZIP 的长度直到流结束才知道，服务端已经用 Content-Disposition: attachment
     // 指定下载。WebKit 会挂起同时带空 download 属性的未知长度响应，因此目录归档移除该
     // 冗余属性；普通文件页仍保留 HTML 原生 download 提示。
@@ -616,13 +592,12 @@ function createPathRow(context, item, index) {
   const actions = document.createElement("td");
   actions.className = "cell-actions";
   if ((isDirectory && context.data.allow_archive) || !isDirectory) {
-    const tokenDownloadLimit = isDirectory ? undefined : browserTokenDownloadLimit(item.size);
-    actions.append(createActionLink("download", isDirectory ? `${url}?zip` : url,
+    const downloadName = isDirectory ? null : (item.name.split("/").at(-1) ?? item.name);
+    actions.append(createActionLink("download", isDirectory ? `${url}?zip` : `${url}?download`,
       isDirectory ? "Download folder as a .zip file" : "Download file",
       isDirectory ? `Download ${item.name} as a zip file` : `Download ${item.name}`, true,
-      tokenDownloadLimit, !isDirectory));
+      downloadName));
   }
-  let hasEdit = false;
   if (context.data.allow_delete) {
     if (context.data.allow_upload) {
       if (context.data.mutation_version !== null) {
@@ -632,10 +607,6 @@ function createPathRow(context, item, index) {
           if (destination) window.location.assign(new URL(".", destination).href);
         });
         actions.append(move);
-      }
-      if (!isDirectory) {
-        actions.append(createActionLink("edit", `${url}?edit`, "Edit file", `Edit ${item.name}`));
-        hasEdit = true;
       }
     }
     if (context.data.mutation_version !== null) {
@@ -654,7 +625,7 @@ function createPathRow(context, item, index) {
       actions.append(remove);
     }
   }
-  if (!hasEdit && !isDirectory) actions.append(createActionLink("view", `${url}?view`, "View file", `View ${item.name}`));
+  if (!isDirectory) actions.append(createActionLink("view", `${url}?view`, "View file", `View ${item.name}`));
   row.append(iconCell, nameCell, modified, size, actions);
   return row;
 }
@@ -684,21 +655,17 @@ export function removePathItem(paths, item) {
  * @param {string} title
  * @param {string} label
  * @param {boolean} [download]
- * @param {number} [tokenDownloadLimit]
- * @param {boolean} [downloadAttribute]
+ * @param {string|null} [downloadName]
  */
-function createActionLink(iconName, href, title, label, download = false, tokenDownloadLimit,
-  downloadAttribute = download) {
+function createActionLink(iconName, href, title, label, download = false,
+  downloadName = download ? "" : null) {
   const link = document.createElement("a");
-  link.className = download ? "action-btn dlwt" : "action-btn";
+  link.className = "action-btn";
   link.href = href;
   link.title = title;
   link.setAttribute("aria-label", label);
   if (download) {
-    if (downloadAttribute) link.download = "";
-    if (tokenDownloadLimit !== undefined) {
-      link.dataset.tokenDownloadLimit = String(tokenDownloadLimit);
-    }
+    if (downloadName !== null) link.download = downloadName;
   }
   else {
     link.target = "_blank";
@@ -729,7 +696,6 @@ export function setupAuthentication(context) {
   dom.userName.textContent = data.user;
   if (data.user) {
     dom.logoutButton.classList.remove("hidden");
-    setupTokenDownloads();
   }
   dom.logoutButton.addEventListener("click", async () => {
     dom.logoutButton.disabled = true;
@@ -739,51 +705,6 @@ export function setupAuthentication(context) {
     } catch (error) {
       window.alert(`Logout failed: ${errorMessage(error)}`);
       dom.logoutButton.disabled = false;
-    }
-  });
-}
-
-function setupTokenDownloads() {
-  document.addEventListener("click", async event => {
-    if (!(event instanceof MouseEvent) || event.button !== 0 || event.defaultPrevented) return;
-    if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
-    const target = event.target instanceof Element ? event.target.closest("a.dlwt") : null;
-    if (!(target instanceof HTMLAnchorElement)) return;
-    const rawLimit = target.dataset.tokenDownloadLimit;
-    // 中文：未知大小的归档和已知大文件保留浏览器原生流式下载路径。
-    // English: Unknown-size archives and known-large files stay on the browser's native streaming path.
-    if (rawLimit === undefined) return;
-    const limit = Number(rawLimit);
-    if (!Number.isSafeInteger(limit) || limit < 0) return;
-    // 中文：第二个并发点击也走浏览器流式路径，使 JavaScript 同时只缓冲一个小文件。
-    // English: A simultaneous second click also streams natively, bounding JavaScript buffering to one small file.
-    if (tokenDownloadActive) return;
-    event.preventDefault();
-    tokenDownloadActive = true;
-    try {
-      const blob = await downloadWithToken(target.href, limit);
-      const objectUrl = URL.createObjectURL(blob);
-      const download = document.createElement("a");
-      download.href = objectUrl;
-      const pathname = new URL(target.href).pathname;
-      const rawName = pathname.split("/").filter(Boolean).at(-1);
-      const name = rawName ? decodeURIComponent(rawName) : "download";
-      download.download = new URL(target.href).searchParams.has("zip") ? `${name}.zip` : name;
-      document.body.append(download);
-      download.click();
-      download.remove();
-      setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
-    } catch {
-      // 中文：token 支持是可选的；未配置密钥时保留普通认证下载。
-      // English: Token support is optional; preserve ordinary authenticated downloads when no key is configured.
-      const fallback = document.createElement("a");
-      fallback.href = target.href;
-      fallback.download = target.download;
-      document.body.append(fallback);
-      fallback.click();
-      fallback.remove();
-    } finally {
-      tokenDownloadActive = false;
     }
   });
 }
@@ -881,24 +802,6 @@ function setupCreateControls(context) {
       window.location.assign(`${url}/`);
     } catch (error) {
       window.alert(`Cannot create folder \`${name}\`: ${errorMessage(error)}`);
-    }
-  });
-  const file = requireElement(".new-file", HTMLButtonElement);
-  file.classList.remove("hidden");
-  file.addEventListener("click", async () => {
-    const name = window.prompt("Enter file name");
-    if (!name) return;
-    if (!isSafePathSegment(name)) {
-      window.alert("A file name must be one path segment and cannot be . or ..");
-      return;
-    }
-    try {
-      await authenticate(context);
-      const url = resourceUrl(name);
-      await createEmptyFile(url);
-      window.location.assign(`${url}?edit`);
-    } catch (error) {
-      window.alert(`Cannot create file \`${name}\`: ${errorMessage(error)}`);
     }
   });
 }
@@ -1268,21 +1171,19 @@ export async function runDroppedEntryTraversal(entries, onFile, options = {}) {
  * @param {import("./ui-state.js").AppContext} context
  * @param {string} name
  * @param {string} url
- * @param {string} [sourceEtag]
  */
-export async function deletePathInteractive(context, name, url, sourceEtag) {
+export async function deletePathInteractive(context, name, url) {
   if (!window.confirm(`Delete \`${name}\`?`)) return false;
   try {
     await authenticate(context);
-    await deleteResource(url, mutationVersionForListAction(context), sourceEtag);
+    await deleteResource(url, mutationVersionForListAction(context));
     invalidateListingMutationVersion(context);
     return true;
   } catch (error) {
     if (error instanceof ApiError && error.status === 412) {
-      const changed = sourceEtag === undefined
-        ? "The directory changed since this listing was loaded. Refresh before trying again."
-        : "The file changed on the server since this page was loaded. Reload before trying again.";
-      window.alert(`Cannot delete \`${name}\`: ${changed}`);
+      window.alert(
+        `Cannot delete \`${name}\`: The directory changed since this listing was loaded. Refresh before trying again.`,
+      );
     } else {
       window.alert(`Cannot delete \`${name}\`: ${errorMessage(error)}`);
     }
@@ -1293,9 +1194,8 @@ export async function deletePathInteractive(context, name, url, sourceEtag) {
 /**
  * @param {import("./ui-state.js").AppContext} context
  * @param {string} sourceUrl
- * @param {string} [sourceEtag]
  */
-export async function movePathInteractive(context, sourceUrl, sourceEtag) {
+export async function movePathInteractive(context, sourceUrl) {
   const source = new URL(sourceUrl);
   const prefix = context.data.uri_prefix.replace(/\/$/, "");
   const oldPath = decodeURIComponent(source.pathname.slice(prefix.length));
@@ -1313,13 +1213,10 @@ export async function movePathInteractive(context, sourceUrl, sourceEtag) {
     await authenticate(context);
     const probe = await resourceExists(destination);
     if (probe.status === 200) {
-      // HEAD 与 MOVE Overwrite:T 之间无法用 Ram 当前的 DAV 子集对目标 ETag 做
-      // tagged `If` 原子约束。浏览器 UI 因此拒绝覆盖，避免“确认之后、MOVE 之前”
-      // 被其他客户端更新的文件静默丢失。
-      // Ram's current DAV subset cannot bind the destination ETag atomically
-      // across HEAD and MOVE Overwrite:T with a tagged `If` condition. The web
-      // UI therefore refuses overwrite rather than losing a version created
-      // after the user's probe.
+      // 内部 MOVE 接口不提供跨 HEAD 探测的目标 ETag 原子约束。浏览器 UI 因此拒绝覆盖，
+      // 避免“确认之后、MOVE 之前”被其他客户端更新的文件静默丢失。
+      // The internal MOVE API cannot bind a destination ETag atomically across the HEAD probe.
+      // Refuse overwrite rather than losing a version created after the user's probe.
       window.alert("The destination already exists. Delete it explicitly before moving this item.");
       return undefined;
     } else if (probe.status !== 404) {
@@ -1330,16 +1227,14 @@ export async function movePathInteractive(context, sourceUrl, sourceEtag) {
       destination,
       false,
       mutationVersionForListAction(context),
-      sourceEtag,
     );
     invalidateListingMutationVersion(context);
     return destination;
   } catch (error) {
     if (error instanceof ApiError && error.status === 412) {
-      const changed = sourceEtag === undefined
-        ? "The directory changed since this listing was loaded. Refresh before trying again."
-        : "The source file changed on the server since this page was loaded. Reload before trying again.";
-      window.alert(`Cannot move \`${oldPath}\` to \`${newPath}\`: ${changed}`);
+      window.alert(
+        `Cannot move \`${oldPath}\` to \`${newPath}\`: The directory changed since this listing was loaded. Refresh before trying again.`,
+      );
     } else {
       window.alert(`Cannot move \`${oldPath}\` to \`${newPath}\`: ${errorMessage(error)}`);
     }

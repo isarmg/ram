@@ -75,16 +75,6 @@ export function getEncoding(contentType) {
   return "utf-8";
 }
 
-/** @param {string} encoding */
-export function isUtf8Encoding(encoding) {
-  return encoding === "utf-8" || encoding === "utf8" || encoding === "unicode-1-1-utf-8";
-}
-
-/** @param {Uint8Array} bytes */
-export function hasUtf8Bom(bytes) {
-  return bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf;
-}
-
 /** @param {string} base64String */
 export function decodeBase64(base64String) {
   // 当前 evergreen 浏览器可直接构造字节数组，但开发期使用的 Node 24 尚未实现该 API。

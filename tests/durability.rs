@@ -41,6 +41,8 @@ fn writable_server_command(root: &Path, port: u16) -> std::process::Command {
         "30s",
         "--upload-total-timeout",
         "5m",
+        "--storage-reserve",
+        "0",
         "--stale-upload-cleanup-age",
         "1s",
         "--stale-upload-cleanup-max-entries",

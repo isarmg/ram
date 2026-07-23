@@ -1,8 +1,6 @@
-//! 通用工具函数：时间戳、URI 编解码、文件名提取、HTTP Range 解析、TLS 证书加载等。
+//! 通用工具函数：时间戳、URI 编解码、文件名提取与 HTTP Range 解析等。
 //!
 //! ## 本模块的 Rust 知识点
-//! - **条件编译**：`#[cfg(feature = "tls")]` 让 TLS 相关代码只在启用 `tls`
-//!   特性时才编译，`--no-default-features` 构建时这些函数根本不存在。
 //! - **`Cow`（Clone on Write）**：`decode_uri` 返回 `Cow<str>`——如果输入
 //!   不含百分号编码就直接借用原字符串（零拷贝），需要解码时才分配新内存。
 //! - **`Option`/`Result` 组合子**：大量使用 `and_then`、`ok_or_else`、`?`
@@ -10,24 +8,16 @@
 //!
 //! ## English overview
 //! Shared helpers for timestamps, URI encoding/decoding, filename extraction, HTTP Range parsing,
-//! TLS certificate loading, and related operations.
+//! and related operations.
 //!
 //! ## Rust concepts in this module
-//! - **Conditional compilation**: `#[cfg(feature = "tls")]` compiles TLS-related code only when the
-//!   `tls` feature is enabled; those functions do not exist in `--no-default-features` builds.
 //! - **`Cow` (clone on write)**: `decode_uri` returns `Cow<str>`. It borrows an input with no percent
 //!   escapes without allocating and allocates only when decoding is required.
 //! - **`Option`/`Result` combinators**: `and_then`, `ok_or_else`, and `?` compose sequences of steps
 //!   that may fail.
 
-#[cfg(feature = "tls")]
-use anyhow::Context;
 use anyhow::{Result, anyhow};
 
-#[cfg(feature = "tls")]
-use rustls_pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
-#[cfg(feature = "tls")]
-use std::io::Read;
 use std::{
     borrow::Cow,
     path::Path,
@@ -84,44 +74,6 @@ pub fn decode_uri(v: &str) -> Option<Cow<'_, str>> {
         .ok()
 }
 
-/// XML/HTML 文本转义：过滤 XML 1.0 不允许的字符，并把 `<`、`>`、`&`
-/// 替换为对应实体。这里直接实现所需处理，避免为一个小函数引入完整
-/// XML 写入器。
-///
-/// 输出只可用于 XML 文本节点（PCDATA）和 HTML 元素内容，**不适用于
-/// 属性值**——属性还需转义引号。本项目嵌入属性的用户数据一律走 URI
-/// 编码（`encode_uri` 会编码引号），不经过本函数。
-/// Escape legal XML 1.0 text-node characters only; this is not an attribute escaper.
-pub fn escape_xml(v: &str) -> Cow<'_, str> {
-    if v.chars()
-        .all(|c| is_xml_10_char(c) && !matches!(c, '<' | '>' | '&'))
-    {
-        return Cow::Borrowed(v);
-    }
-    let mut output = String::with_capacity(v.len() + 8);
-    for c in v.chars() {
-        if !is_xml_10_char(c) {
-            continue;
-        }
-        match c {
-            '<' => output.push_str("&lt;"),
-            '>' => output.push_str("&gt;"),
-            '&' => output.push_str("&amp;"),
-            c => output.push(c),
-        }
-    }
-    Cow::Owned(output)
-}
-
-/// XML 1.0 Fifth Edition 合法字符；Rust char 无代理项，只需排除禁用 C0 与保留 BMP 点。
-/// XML 1.0 Fifth Edition character set; Rust chars cannot contain surrogates.
-pub(crate) fn is_xml_10_char(c: char) -> bool {
-    matches!(c, '\u{9}' | '\u{A}' | '\u{D}')
-        || ('\u{20}'..='\u{D7FF}').contains(&c)
-        || ('\u{E000}'..='\u{FFFD}').contains(&c)
-        || ('\u{10000}'..='\u{10FFFF}').contains(&c)
-}
-
 /// 返回 UTF-8 最末路径段，缺失/非 UTF-8 时为空。 / Return the final UTF-8 path segment or empty on absence/non-UTF-8.
 pub fn get_file_name(path: &Path) -> &str {
     path.file_name()
@@ -136,41 +88,6 @@ pub fn try_get_file_name(path: &Path) -> Result<&str> {
     path.file_name()
         .and_then(|v| v.to_str())
         .ok_or_else(|| anyhow!("Failed to get file name of `{}`", path.display()))
-}
-
-// 中文：从固定身份 PEM reader 加载证书链。 / English: Load a certificate chain from an identity-pinned PEM reader.
-#[cfg(feature = "tls")]
-pub fn load_certs_from_reader(
-    reader: impl Read,
-    display_path: &Path,
-) -> Result<Vec<CertificateDer<'static>>> {
-    let mut certs = vec![];
-    for cert in CertificateDer::pem_reader_iter(reader) {
-        let cert = cert.with_context(|| {
-            format!(
-                "Invalid certificate data in file `{}`",
-                display_path.display()
-            )
-        })?;
-        certs.push(cert)
-    }
-    if certs.is_empty() {
-        anyhow::bail!(
-            "No supported certificate in file `{}`",
-            display_path.display()
-        );
-    }
-    Ok(certs)
-}
-
-// 中文：从固定身份 PEM reader 加载 TLS 私钥。 / English: Load a private key from an identity-pinned PEM reader.
-#[cfg(feature = "tls")]
-pub fn load_private_key_from_reader(
-    reader: impl Read,
-    display_path: &Path,
-) -> Result<PrivateKeyDer<'static>> {
-    PrivateKeyDer::from_pem_reader(reader)
-        .with_context(|| format!("Failed to load key file at `{}`", display_path.display()))
 }
 
 /// HTTP byte-range 解析结果。调用方必须区分“不认识的单位”、
@@ -288,12 +205,6 @@ mod tests {
         assert!(is_trusted_file_owner_for(0, 1_000));
         assert!(is_trusted_file_owner_for(1_000, 1_000));
         assert!(!is_trusted_file_owner_for(1_001, 1_000));
-    }
-
-    #[test]
-    fn escape_xml_filters_invalid_xml_10_controls() {
-        assert_eq!(escape_xml("a\u{0}\u{1}\t\n\r<&>b"), "a\t\n\r&lt;&amp;&gt;b");
-        assert!(matches!(escape_xml("plain text"), Cow::Borrowed(_)));
     }
 
     #[test]

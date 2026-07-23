@@ -4,7 +4,8 @@ mod fixtures;
 mod utils;
 
 use fixtures::{
-    Error, ServerProc, TEST_AUTH_PASS, TEST_AUTH_RULE, TEST_AUTH_USER, port, ram_command, tmpdir,
+    Error, ServerProc, TEST_AUTH_PASS, TEST_AUTH_RULE, TEST_AUTH_USER, port,
+    ram_command as fixture_ram_command, tmpdir,
 };
 
 use assert_cmd::prelude::*;
@@ -19,6 +20,12 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime};
+
+fn ram_command(root: &Path, port: u16) -> std::process::Command {
+    let mut command = fixture_ram_command(root, port);
+    command.args(["--storage-reserve", "0"]);
+    command
+}
 
 fn spawn_server(tmpdir: &TempDir, port: u16) -> ServerProc {
     let mut cmd = ram_command(tmpdir.path(), port);

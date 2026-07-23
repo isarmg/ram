@@ -106,7 +106,6 @@ svg {
 
 button.control,
 .action-btn,
-.save-btn,
 .logout-btn,
 .cancel-upload-btn,
 .retry-btn {
@@ -121,7 +120,6 @@ button.control,
  * 语义按钮在桌面端保持 dufs 0.46 的紧凑外观；触屏尺寸在下方单独放大。 */
 .control,
 .action-btn,
-.save-btn,
 .logout-btn,
 .cancel-upload-btn,
 .retry-btn {
@@ -297,7 +295,6 @@ button.control,
 
 .control:focus-visible,
 .action-btn:focus-visible,
-.save-btn:focus-visible,
 .logout-btn:focus-visible,
 .cancel-upload-btn:focus-visible,
 .retry-btn:focus-visible,
@@ -315,15 +312,18 @@ a:focus-visible {
   padding-right: 1em;
 }
 
-.editor {
+.text-viewer {
   box-sizing: border-box;
   width: 100%;
-  height: calc(100vh - 5rem);
+  min-height: calc(100vh - 5rem);
+  margin: 0;
   border: 1px solid var(--border-secondary);
   background: var(--bg-primary);
   color: var(--text-primary);
-  outline: none;
-  padding: 5px;
+  padding: 0.75rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 /* 用户要求减少动效时，焦点和布局不应继续播放宽度/颜色过渡。
@@ -334,20 +334,9 @@ a:focus-visible {
   }
 }
 
-.editor:focus-visible {
-  outline: 2px solid var(--focus-ring, #4c8bf5);
-  outline-offset: -1px;
-}
-
 .toolbox-right {
   margin-left: auto;
   margin-right: 2em;
-}
-
-.save-btn {
-  padding: 0;
-  cursor: pointer;
-  user-select: none;
 }
 
 .logout-btn {
@@ -363,7 +352,6 @@ a:focus-visible {
 @media (pointer: coarse), (max-width: 600px) {
   .control,
   .action-btn,
-  .save-btn,
   .logout-btn,
   .cancel-upload-btn,
   .retry-btn {
@@ -393,7 +381,7 @@ a:focus-visible {
   padding-left: 3px;
 }
 
-.not-editable {
+.viewer-status {
   font-style: italic;
 }
 

@@ -1,9 +1,9 @@
 //! Ram 所实现资源方法的唯一权威描述。路由器通过 [`ResourceMethod`] 解析方法，而
-//! `Allow`、`OPTIONS`、405 响应与 CORS 预检都渲染经过筛选的
+//! `Allow`、`OPTIONS` 与 405 响应都渲染经过筛选的
 //! [`ResourceCapabilities`] 值。把两者集中在这里，可防止协议声明偏离分派表。
 //!
 //! The one authoritative description of the resource methods Ram implements. The router parses
-//! methods through [`ResourceMethod`], while `Allow`, `OPTIONS`, 405 responses, and CORS preflights
+//! methods through [`ResourceMethod`], while `Allow`, `OPTIONS`, and 405 responses
 //! render a filtered [`ResourceCapabilities`] value. Keeping both pieces here prevents protocol
 //! advertisements from drifting away from the dispatch table.
 
@@ -24,14 +24,6 @@ pub(super) enum ResourceTarget {
 /// 对特定目标与调用方有意义的方法集合。 / Methods meaningful for one selected target and caller.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct ResourceCapabilities(u16);
-
-/// CORS 公共包络附带的最大目标能力；预检不携带后续凭据，故先受目标/全局开关限制，
-/// 再与运维 CORS 列表取交集，实际请求仍必须经过 ACL。
-/// Maximum target capability for the CORS envelope. Preflights lack request
-/// credentials, so target/global gates and the operator allowlist bound it;
-/// the actual request still passes ACL enforcement.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(super) struct CorsPreflightCapabilities(pub(super) ResourceCapabilities);
 
 impl ResourceCapabilities {
     pub(super) fn for_target(
@@ -61,29 +53,20 @@ impl ResourceCapabilities {
         // English: Lookup methods route missing names to 404 rather than 405;
         // retaining them lets one table drive dispatch without changing that distinction.
         let exists = target != ResourceTarget::Missing;
-        // 特殊文件系统节点没有可选择的 HTTP/DAV 表示，但查找方法仍需路由并返回 404，
-        // 与缺失名称保持一致；属性变更继续在下方排除。DELETE/MOVE 可操作其命名空间项。
-        // Special filesystem nodes have no selectable HTTP/DAV representation, but lookup methods
-        // still route to 404 just like missing names. Property mutation remains excluded below,
-        // while DELETE/MOVE may operate on the namespace entry.
+        // 特殊文件系统节点没有可选择的 HTTP 表示，但查找方法仍需路由并返回 404；
+        // DELETE/MOVE 可操作其命名空间项。
+        // Special filesystem nodes have no selectable HTTP representation, but lookup methods
+        // still route to 404; DELETE/MOVE may operate on the namespace entry.
         if readable {
             capabilities.insert(ResourceMethod::Get);
             capabilities.insert(ResourceMethod::Head);
-            capabilities.insert(ResourceMethod::Propfind);
         }
 
         if writable && exists {
-            // 中文：Ram 解析 PROPPATCH 并逐属性拒绝不支持的 dead-property 存储；
-            // 因而只向可在该资源执行非安全方法的调用方声明。
-            // English: Ram parses PROPPATCH and rejects unsupported dead
-            // properties individually, so only unsafe-method-capable callers see it.
-            if target != ResourceTarget::Other {
-                capabilities.insert(ResourceMethod::Proppatch);
-            }
-            // 固定服务根是可读 DAV 集合，但在服务能力内没有父目录槽位，因此根本身不能
+            // 固定服务根在服务能力内没有父目录槽位，因此根本身不能
             // DELETE 或 MOVE。
-            // The pinned service root is a readable DAV collection, but it has no parent slot in
-            // the served capability and therefore cannot itself be deleted or moved.
+            // The pinned service root has no parent slot in the served capability and therefore
+            // cannot itself be deleted or moved.
             if allow_delete && target != ResourceTarget::RootCollection {
                 capabilities.insert(ResourceMethod::Delete);
             }
@@ -99,26 +82,13 @@ impl ResourceCapabilities {
             }
             ResourceTarget::EmptyFile if writable && allow_upload => {
                 capabilities.insert(ResourceMethod::Put);
-                capabilities.insert(ResourceMethod::Patch);
             }
-            ResourceTarget::File if writable && allow_upload => {
-                // 中文：替换非空表示也会删除旧字节；仅追加 PATCH 仍不要求 DELETE。
-                // English: Replacing a non-empty representation deletes old bytes; append-only PATCH remains possible without DELETE.
-                if allow_delete {
-                    capabilities.insert(ResourceMethod::Put);
-                }
-                capabilities.insert(ResourceMethod::Patch);
+            ResourceTarget::File if writable && allow_upload && allow_delete => {
+                // 替换非空表示会删除旧字节，因此还需要删除权限。
+                // Replacing a non-empty representation deletes old bytes and also requires delete permission.
+                capabilities.insert(ResourceMethod::Put);
             }
             _ => {}
-        }
-
-        if readable
-            && allow_upload
-            && matches!(target, ResourceTarget::EmptyFile | ResourceTarget::File)
-        {
-            // 中文：COPY 只读取源；解析 Destination 后再评估目标 ACL 与覆盖策略。
-            // English: COPY reads this source; destination ACL and overwrite policy are evaluated after parsing Destination.
-            capabilities.insert(ResourceMethod::Copy);
         }
 
         capabilities
@@ -139,20 +109,6 @@ impl ResourceCapabilities {
         self.names().collect::<Vec<_>>().join(", ")
     }
 
-    pub(super) fn intersection(self, other: Self) -> Self {
-        Self(self.0 & other.0)
-    }
-
-    pub(super) fn from_method_names<'a>(methods: impl IntoIterator<Item = &'a str>) -> Self {
-        let mut capabilities = Self::default();
-        for method in methods {
-            if let Some(method) = ResourceMethod::parse_name(method) {
-                capabilities.insert(method);
-            }
-        }
-        capabilities
-    }
-
     pub(super) fn insert(&mut self, method: ResourceMethod) {
         self.0 |= method.bit();
     }
@@ -168,19 +124,17 @@ mod tests {
             ResourceCapabilities::for_target(ResourceTarget::Collection, true, false, true, true);
         assert_eq!(
             capabilities.allow_header(),
-            "GET, HEAD, OPTIONS, PROPFIND, CHECKAUTH, LOGOUT"
+            "GET, HEAD, OPTIONS, CHECKAUTH, LOGOUT"
         );
     }
 
     #[test]
     fn file_and_collection_capabilities_follow_real_handler_limits() {
         let file = ResourceCapabilities::for_target(ResourceTarget::File, true, true, true, true);
-        assert!(file.contains(ResourceMethod::Copy));
         assert!(!file.contains(ResourceMethod::Mkcol));
 
         let collection =
             ResourceCapabilities::for_target(ResourceTarget::Collection, true, true, true, true);
-        assert!(!collection.contains(ResourceMethod::Copy));
         assert!(collection.contains(ResourceMethod::Move));
 
         let root = ResourceCapabilities::for_target(
@@ -190,7 +144,6 @@ mod tests {
             true,
             true,
         );
-        assert!(root.contains(ResourceMethod::Proppatch));
         assert!(!root.contains(ResourceMethod::Delete));
         assert!(!root.contains(ResourceMethod::Move));
 
@@ -198,9 +151,8 @@ mod tests {
             ResourceCapabilities::for_target(ResourceTarget::Other, true, true, true, true);
         assert_eq!(
             special.allow_header(),
-            "GET, HEAD, OPTIONS, DELETE, PROPFIND, MOVE, CHECKAUTH, LOGOUT"
+            "GET, HEAD, OPTIONS, DELETE, MOVE, CHECKAUTH, LOGOUT"
         );
-        assert!(!special.contains(ResourceMethod::Proppatch));
     }
 
     #[test]
@@ -215,7 +167,6 @@ mod tests {
         // English: Lookup methods stay routable and return 404 for a missing name, not unsupported 405.
         assert!(writable.contains(ResourceMethod::Get));
         assert!(writable.contains(ResourceMethod::Head));
-        assert!(writable.contains(ResourceMethod::Propfind));
 
         let readonly =
             ResourceCapabilities::for_target(ResourceTarget::Missing, false, false, true, true);

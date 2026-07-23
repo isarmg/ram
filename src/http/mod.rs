@@ -4,8 +4,8 @@
 //!
 //! - [`body`] 把 Hyper 帧适配为有界字节流，并让请求许可一直存活到响应体
 //!   完成、报错或被客户端取消；
-//! - [`methods`] 维护标准 HTTP/WebDAV 方法到内部路由类别的唯一映射，使路由、
-//!   `Allow`、CORS 和 405 响应不会各自维护一份容易漂移的列表；
+//! - [`methods`] 维护支持的 HTTP 方法到内部路由类别的唯一映射，使路由、
+//!   `Allow` 和 405 响应不会各自维护一份容易漂移的列表；
 //! - [`io_watchdog`] 在连接级监督读停滞、写停滞和最大生命周期，防止慢速客户端
 //!   永久占用 socket、请求许可或响应生产任务。
 //!
@@ -18,7 +18,7 @@
 //! watchdogs. This layer deliberately knows nothing about filesystem paths or
 //! ACLs. It instead composes three invariants: `body` adapts Hyper frames into
 //! bounded streams and retains admission permits through terminal response
-//! delivery; `methods` is the single mapping from HTTP/WebDAV methods to route
+//! delivery; `methods` is the single mapping from supported HTTP methods to route
 //! classes; and `io_watchdog` bounds read stalls, write stalls, and connection
 //! lifetime. Inbound data flows from `Incoming` through `IncomingStream` into a
 //! feature-specific bounded reader. Outbound data passes through permit,

@@ -1,18 +1,18 @@
 /**
  * 浏览器启动编排层。它先校验嵌入状态与 DOM，再渲染面包屑和通用认证
- * 控件，最后根据 `Index/Edit/View` 类型进入目录页或编辑页。任一阶段异常都
+ * 控件，最后根据 `Index/View` 类型进入目录页或只读查看页。任一阶段异常都
  * 进入唯一的致命错误界面，避免留下部分初始化、可误操作的页面。
  *
  * Browser bootstrap orchestrator. It validates embedded state and DOM,
- * renders navigation/authentication, then dispatches Index versus Edit/View
+ * renders navigation/authentication, then dispatches Index versus View
  * setup. Any stage failure reaches one fatal-error surface, avoiding a
  * partially initialized page that still appears actionable.
  */
 
-import { editorState, setupEditorPage } from "./editor.js";
 import { setupAuthentication, setupIndexPage, uploadState } from "./file-operations.js";
 import { createIcon } from "./icons.js";
 import { loadAppContext, requireElement, showFatalError } from "./ui-state.js";
+import { setupViewerPage } from "./viewer.js";
 
 /**
  * 仅使用 DOM 文本节点渲染面包屑；URL 段只编码一次，绝不解释为标记。
@@ -70,7 +70,7 @@ export async function startApplication() {
   try {
     const context = loadAppContext();
     window.addEventListener("beforeunload", event => {
-      if (uploadState.pending > 0 || uploadState.active > 0 || editorState.dirty) {
+      if (uploadState.pending > 0 || uploadState.active > 0) {
         event.preventDefault();
         // 现代浏览器只显示自有文案，但仍要设置 returnValue 才能兼容旧的
         // beforeunload 触发契约。
@@ -86,9 +86,9 @@ export async function startApplication() {
       context.dom.indexPage.classList.remove("hidden");
       await setupIndexPage(context);
     } else {
-      document.title = `${context.data.kind === "Edit" ? "Edit" : "View"} ${context.data.href} - Ram`;
-      context.dom.editorPage.classList.remove("hidden");
-      await setupEditorPage(context);
+      document.title = `View ${context.data.href} - Ram`;
+      context.dom.viewerPage.classList.remove("hidden");
+      await setupViewerPage(context);
     }
   } catch (error) {
     showFatalError(error);

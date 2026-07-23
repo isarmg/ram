@@ -8,3 +8,4 @@ hidden:
 auth:
   - user:pass@/:rw
 allow-upload: true
+storage-reserve: 0

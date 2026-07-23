@@ -27,7 +27,7 @@ pub fn build_cli() -> Command {
     // 中文：库 crate 名为 `ram_fileserver`，但安装后的公开命令和文档调用统一为 `ram`。
     // English: The library crate is `ram_fileserver`, while the installed
     // executable and every documented invocation are named `ram`.
-    let app = Command::new("ram")
+    Command::new("ram")
         .version(env!("CARGO_PKG_VERSION"))
         .author(env!("CARGO_PKG_AUTHORS"))
         .about(concat!(
@@ -35,6 +35,10 @@ pub fn build_cli() -> Command {
             " - ",
             env!("CARGO_PKG_REPOSITORY")
         ))
+        .after_help(
+            "Resource limits default to the bounded personal-intranet profile. \
+             Override advanced controls only after measuring a real bottleneck.",
+        )
         .arg(
             Arg::new("config")
                 .env("RAM_CONFIG")
@@ -57,7 +61,7 @@ pub fn build_cli() -> Command {
                 .hide_env(true)
                 .short('b')
                 .long("bind")
-                .help("Specify bind address or unix socket")
+                .help("Specify a TCP IP address")
                 .action(ArgAction::Append)
                 .value_delimiter(',')
                 .value_name("addrs"),
@@ -121,112 +125,6 @@ pub fn build_cli() -> Command {
             "RAM_ALLOW_FILESYSTEM_ROOT",
             "DANGEROUS: explicitly permit serving the filesystem root `/`",
         ))
-        .arg(boolean_switch(
-            "allow-active-content-risk",
-            "RAM_ALLOW_ACTIVE_CONTENT_RISK",
-            "DANGEROUS: allow uploads together with same-origin render modes",
-        ))
-        .arg(boolean_switch(
-            "allow-h2c",
-            "RAM_ALLOW_H2C",
-            "Allow cleartext prior-knowledge HTTP/2 (disabled by default)",
-        ))
-        .arg(boolean_switch(
-            "allow-abstract-unix-socket",
-            "RAM_ALLOW_ABSTRACT_UNIX_SOCKET",
-            "DANGEROUS: allow Linux abstract Unix sockets, which have no filesystem permission boundary",
-        ))
-        .arg(
-            Arg::new("unix-socket-mode")
-                .env("RAM_UNIX_SOCKET_MODE")
-                .hide_env(true)
-                .long("unix-socket-mode")
-                .value_parser(parse_unix_socket_mode)
-                .value_name("octal-mode")
-                .help("Exact pathname Unix socket permission mode [default: 0600]"),
-        )
-        .arg(
-            Arg::new("unix-socket-uid")
-                .env("RAM_UNIX_SOCKET_UID")
-                .hide_env(true)
-                .long("unix-socket-uid")
-                .value_parser(value_parser!(u32))
-                .value_name("uid")
-                .help("Optional numeric owner UID for pathname Unix sockets"),
-        )
-        .arg(
-            Arg::new("unix-socket-gid")
-                .env("RAM_UNIX_SOCKET_GID")
-                .hide_env(true)
-                .long("unix-socket-gid")
-                .value_parser(value_parser!(u32))
-                .value_name("gid")
-                .help("Optional numeric owner GID for pathname Unix sockets"),
-        )
-        .arg(
-            Arg::new("trusted-proxy")
-                .env("RAM_TRUSTED_PROXY")
-                .hide_env(true)
-                .long("trusted-proxy")
-                .action(ArgAction::Append)
-                .value_delimiter(',')
-                .value_parser(clap::builder::ValueParser::new(IpCidr::from_str))
-                .value_name("cidr")
-                .help("Direct-peer proxy CIDR allowlist; empty by default"),
-        )
-        .arg(
-            Arg::new("trusted-proxy-header")
-                .env("RAM_TRUSTED_PROXY_HEADER")
-                .hide_env(true)
-                .long("trusted-proxy-header")
-                .value_parser(clap::builder::ValueParser::new(ForwardedHeader::from_str))
-                .value_name("header")
-                .help("Forwarded client header accepted only from trusted proxies: x-forwarded-for or x-real-ip"),
-        )
-        .arg(
-            Arg::new("token-secret")
-                .env("RAM_TOKEN_SECRET")
-                .hide_env(true)
-                .long("token-secret")
-                .conflicts_with("token-secret-file")
-                .value_name("secret")
-                .help("DEVELOPMENT ONLY: token HMAC secret in argv; production should use --token-secret-file"),
-        )
-        .arg(
-            Arg::new("token-secret-file")
-                .env("RAM_TOKEN_SECRET_FILE")
-                .hide_env(true)
-                .long("token-secret-file")
-                .conflicts_with("token-secret")
-                .value_parser(value_parser!(PathBuf))
-                .value_name("path")
-                .help("Read the persistent token HMAC secret from a trusted 0400/0600 file"),
-        )
-        .arg(
-            Arg::new("token-audience")
-                .env("RAM_TOKEN_AUDIENCE")
-                .hide_env(true)
-                .long("token-audience")
-                .value_name("name")
-                .help("Stable server audience embedded in and required from tokens"),
-        )
-        .arg(
-            Arg::new("token-ttl")
-                .env("RAM_TOKEN_TTL")
-                .hide_env(true)
-                .long("token-ttl")
-                .value_name("duration")
-                .help("Token lifetime such as 900, 15m, 1h [default: 15m]"),
-        )
-        .arg(
-            Arg::new("token-revocation-file")
-                .env("RAM_TOKEN_REVOCATION_FILE")
-                .hide_env(true)
-                .long("token-revocation-file")
-                .value_parser(value_parser!(PathBuf))
-                .value_name("path")
-                .help("Persistent atomic store for revoked token IDs"),
-        )
         .arg(
             boolean_switch("allow-all", "RAM_ALLOW_ALL", "Allow all operations").short('A'),
         )
@@ -255,70 +153,6 @@ pub fn build_cli() -> Command {
             "RAM_ALLOW_ARCHIVE",
             "Allow download folders as archive file",
         ))
-        .arg(boolean_switch(
-            "allow-hash",
-            "RAM_ALLOW_HASH",
-            "Allow ?hash query to get file sha256 hash",
-        ))
-        .arg(boolean_switch(
-            "enable-cors",
-            "RAM_ENABLE_CORS",
-            "Enable CORS using the configured origin/method/header allowlists",
-        ))
-        .arg(
-            Arg::new("cors-origins")
-                .env("RAM_CORS_ORIGINS")
-                .hide_env(true)
-                .long("cors-origins")
-                .action(ArgAction::Append)
-                .value_delimiter(',')
-                .value_name("origins")
-                .help("CORS origin allowlist; exact http(s) origins or a sole * [default: *]"),
-        )
-        .arg(
-            Arg::new("cors-methods")
-                .env("RAM_CORS_METHODS")
-                .hide_env(true)
-                .long("cors-methods")
-                .action(ArgAction::Append)
-                .value_delimiter(',')
-                .value_name("methods")
-                .help("CORS method allowlist, intersected with per-resource capabilities"),
-        )
-        .arg(
-            Arg::new("cors-headers")
-                .env("RAM_CORS_HEADERS")
-                .hide_env(true)
-                .long("cors-headers")
-                .action(ArgAction::Append)
-                .value_delimiter(',')
-                .value_name("headers")
-                .help("CORS request-header allowlist; preflights reject every other name"),
-        )
-        .arg(boolean_switch(
-            "render-index",
-            "RAM_RENDER_INDEX",
-            "Serve index.html for a directory and return 404 when it is missing",
-        ))
-        .arg(boolean_switch(
-            "render-try-index",
-            "RAM_RENDER_TRY_INDEX",
-            "Serve index.html for a directory, otherwise return its listing",
-        ))
-        .arg(boolean_switch(
-            "render-spa",
-            "RAM_RENDER_SPA",
-            "Serve a single page application",
-        ))
-        .arg(
-            Arg::new("assets")
-                .env("RAM_ASSETS")
-                .hide_env(true)
-                .long("assets")
-                .help("Set the path to the assets directory for overriding the built-in assets")
-                .value_parser(value_parser!(PathBuf))
-                .value_name("path")
-        )
         .arg(
             Arg::new("log-format")
                 .env("RAM_LOG_FORMAT")
@@ -326,15 +160,6 @@ pub fn build_cli() -> Command {
                 .long("log-format")
                 .value_name("format")
                 .help("Customize http log format"),
-        )
-        .arg(
-            Arg::new("log-file")
-                .env("RAM_LOG_FILE")
-                .hide_env(true)
-                .long("log-file")
-                .value_name("file")
-                .value_parser(value_parser!(PathBuf))
-                .help("Specify the file to save logs to, other than stdout/stderr"),
         )
         .arg(
             Arg::new("compress")
@@ -345,6 +170,7 @@ pub fn build_cli() -> Command {
                 .value_name("level")
                 .help("Set zip compress level [default: low]")
         )
+        .next_help_heading("Advanced personal-intranet resource overrides")
         .arg(
             Arg::new("max-connections")
                 .env("RAM_MAX_CONNECTIONS")
@@ -352,7 +178,7 @@ pub fn build_cli() -> Command {
                 .long("max-connections")
                 .value_parser(value_parser!(u64).range(1..))
                 .value_name("number")
-                .help("Maximum number of concurrent connections [default: 512]"),
+                .help("Maximum number of concurrent connections [default: 64]"),
         )
         .arg(
             Arg::new("max-concurrent-requests")
@@ -361,7 +187,7 @@ pub fn build_cli() -> Command {
                 .long("max-concurrent-requests")
                 .value_parser(value_parser!(u64).range(1..))
                 .value_name("number")
-                .help("Maximum requests executing or streaming across all connections [default: 64]"),
+                .help("Maximum requests executing or streaming across all connections [default: 32]"),
         )
         .arg(
             Arg::new("max-concurrent-requests-per-source")
@@ -370,7 +196,7 @@ pub fn build_cli() -> Command {
                 .long("max-concurrent-requests-per-source")
                 .value_parser(value_parser!(u64).range(1..))
                 .value_name("number")
-                .help("Maximum executing or streaming requests per verified source [default: 16]"),
+                .help("Maximum executing or streaming requests per remote IP [default: 32]"),
         )
         .arg(
             Arg::new("max-concurrent-requests-per-user")
@@ -379,7 +205,7 @@ pub fn build_cli() -> Command {
                 .long("max-concurrent-requests-per-user")
                 .value_parser(value_parser!(u64).range(1..))
                 .value_name("number")
-                .help("Maximum executing or streaming requests per authenticated account [default: 16]"),
+                .help("Maximum executing or streaming requests per authenticated account [default: 32]"),
         )
         .arg(
             Arg::new("max-request-queue")
@@ -388,7 +214,7 @@ pub fn build_cli() -> Command {
                 .long("max-request-queue")
                 .value_parser(value_parser!(u64))
                 .value_name("number")
-                .help("Maximum requests waiting for the global request limit [default: 64; 0 = no waiting]"),
+                .help("Maximum requests waiting for the global request limit [default: 32; 0 = no waiting]"),
         )
         .arg(
             Arg::new("request-queue-timeout")
@@ -404,7 +230,7 @@ pub fn build_cli() -> Command {
                 .hide_env(true)
                 .long("header-read-timeout")
                 .value_name("duration")
-                .help("Maximum time to receive an HTTP/1 request head or initial h2 preface [default: 30s]"),
+                .help("Maximum time to receive an HTTP/1 request head [default: 30s]"),
         )
         .arg(
             Arg::new("connection-idle-timeout")
@@ -428,7 +254,7 @@ pub fn build_cli() -> Command {
                 .hide_env(true)
                 .long("response-write-idle-timeout")
                 .value_name("duration")
-                .help("Close a connection when its transport write or any individual response/H2 stream makes no progress [default: 30s]"),
+                .help("Close a connection when its transport write or response body makes no progress [default: 30s]"),
         )
         .arg(
             Arg::new("write-lock-timeout")
@@ -463,7 +289,7 @@ pub fn build_cli() -> Command {
                 .long("max-concurrent-uploads")
                 .value_parser(value_parser!(u64).range(1..))
                 .value_name("number")
-                .help("Maximum PUT/PATCH bodies staged concurrently [default: 4]"),
+                .help("Maximum PUT bodies staged concurrently [default: 4]"),
         )
         .arg(
             Arg::new("max-concurrent-uploads-per-user")
@@ -472,7 +298,7 @@ pub fn build_cli() -> Command {
                 .long("max-concurrent-uploads-per-user")
                 .value_parser(value_parser!(u64).range(1..))
                 .value_name("number")
-                .help("Maximum staged PUT/PATCH bodies per authenticated user; hard maximum 1024 [default: 2]"),
+                .help("Maximum staged PUT bodies per authenticated user; hard maximum 1024 [default: 2]"),
         )
         .arg(
             Arg::new("max-concurrent-uploads-per-source")
@@ -481,16 +307,7 @@ pub fn build_cli() -> Command {
                 .long("max-concurrent-uploads-per-source")
                 .value_parser(value_parser!(u64).range(1..))
                 .value_name("number")
-                .help("Maximum staged PUT/PATCH bodies per remote IP; hard maximum 1024 [default: 2]"),
-        )
-        .arg(
-            Arg::new("h2-max-concurrent-streams")
-                .env("RAM_H2_MAX_CONCURRENT_STREAMS")
-                .hide_env(true)
-                .long("h2-max-concurrent-streams")
-                .value_parser(value_parser!(u32).range(1..))
-                .value_name("number")
-                .help("Maximum concurrent streams advertised per HTTP/2 connection [default: 32]"),
+                .help("Maximum staged PUT bodies per remote IP; hard maximum 1024 [default: 3]"),
         )
         .arg(
             Arg::new("max-expensive-tasks")
@@ -499,7 +316,7 @@ pub fn build_cli() -> Command {
                 .long("max-expensive-tasks")
                 .value_parser(value_parser!(u64).range(1..))
                 .value_name("number")
-                .help("Shared admission for directory/search/archive/hash and PUT/PATCH/COPY local workers [default: 4]"),
+                .help("Shared admission for directory/search/archive and PUT workers [default: 2]"),
         )
         .arg(
             Arg::new("max-blocking-threads")
@@ -508,7 +325,7 @@ pub fn build_cli() -> Command {
                 .long("max-blocking-threads")
                 .value_parser(value_parser!(u64).range(1..))
                 .value_name("number")
-                .help("Hard maximum Tokio blocking-pool threads; 1..256 [default: 32]"),
+                .help("Hard maximum Tokio blocking-pool threads; 1..256 [default: 12]"),
         )
         .arg(
             Arg::new("max-walk-entries")
@@ -535,7 +352,7 @@ pub fn build_cli() -> Command {
                 .long("max-search-results")
                 .value_parser(value_parser!(u64).range(1..))
                 .value_name("number")
-                .help("Maximum results returned by one search [default: 10000]"),
+                .help("Maximum results returned by one search [default: 5000]"),
         )
         .arg(
             Arg::new("max-directory-entries")
@@ -547,32 +364,6 @@ pub fn build_cli() -> Command {
                 .help("Maximum entries returned by one directory listing [default: 10000]"),
         )
         .arg(
-            Arg::new("max-webdav-properties")
-                .env("RAM_MAX_WEBDAV_PROPERTIES")
-                .hide_env(true)
-                .long("max-webdav-properties")
-                .value_parser(value_parser!(u64).range(1..))
-                .value_name("number")
-                .help("Maximum explicit PROPFIND/PROPPATCH properties; hard maximum 64 [default: 64]"),
-        )
-        .arg(
-            Arg::new("max-webdav-rendered-properties")
-                .env("RAM_MAX_WEBDAV_RENDERED_PROPERTIES")
-                .hide_env(true)
-                .long("max-webdav-rendered-properties")
-                .value_parser(value_parser!(u64).range(1..))
-                .value_name("number")
-                .help("Maximum WebDAV response resources multiplied by properties; hard maximum 65536 [default: 65536]"),
-        )
-        .arg(
-            Arg::new("max-webdav-response-size")
-                .env("RAM_MAX_WEBDAV_RESPONSE_SIZE")
-                .hide_env(true)
-                .long("max-webdav-response-size")
-                .value_name("size")
-                .help("Maximum buffered WebDAV Multi-Status response; hard maximum 8M [default: 8M]"),
-        )
-        .arg(
             Arg::new("max-archive-size")
                 .env("RAM_MAX_ARCHIVE_SIZE")
                 .hide_env(true)
@@ -581,28 +372,12 @@ pub fn build_cli() -> Command {
                 .help("Maximum uncompressed bytes in one archive, e.g. 512M, 4G [default: 4G]"),
         )
         .arg(
-            Arg::new("max-hash-size")
-                .env("RAM_MAX_HASH_SIZE")
-                .hide_env(true)
-                .long("max-hash-size")
-                .value_name("size")
-                .help("Maximum file size accepted by the SHA-256 endpoint [default: 4G]"),
-        )
-        .arg(
             Arg::new("expensive-task-timeout")
                 .env("RAM_EXPENSIVE_TASK_TIMEOUT")
                 .hide_env(true)
                 .long("expensive-task-timeout")
                 .value_name("duration")
-                .help("Timeout for search/archive/hash operations, e.g. 30s, 5m [default: 5m]"),
-        )
-        .arg(
-            Arg::new("copy-timeout")
-                .env("RAM_COPY_TIMEOUT")
-                .hide_env(true)
-                .long("copy-timeout")
-                .value_name("duration")
-                .help("Request deadline for PUT/PATCH/COPY local publication workers [default: 5m]"),
+                .help("Timeout for search/archive and local mutation workers, e.g. 30s, 5m [default: 5m]"),
         )
         .arg(
             Arg::new("upload-idle-timeout")
@@ -618,7 +393,7 @@ pub fn build_cli() -> Command {
                 .hide_env(true)
                 .long("upload-total-timeout")
                 .value_name("duration")
-                .help("Maximum staging time for one PUT/PATCH upload [default: 15m]"),
+                .help("Maximum staging time for one PUT upload [default: 15m]"),
         )
         .arg(
             Arg::new("stale-upload-cleanup-age")
@@ -669,20 +444,12 @@ pub fn build_cli() -> Command {
                 .hide_env(true)
                 .long("max-upload-size")
                 .value_name("size")
-                .help("Maximum size of a single upload, e.g. 512M, 4G [default: 4G; 0 = unlimited]"),
-        )
-        .arg(
-            Arg::new("max-copy-size")
-                .env("RAM_MAX_COPY_SIZE")
-                .hide_env(true)
-                .long("max-copy-size")
-                .value_name("size")
-                .help("Maximum source file size accepted by WebDAV COPY [default: 4G]"),
+                .help("Maximum size of a single upload, e.g. 512M, 4G [default: 4G]"),
         )
         .arg(boolean_switch(
             "storage-space-check",
             "RAM_STORAGE_SPACE_CHECK",
-            "Preflight target statvfs space/inode availability before COPY/PATCH",
+            "Preflight target statvfs space/inode availability before PUT",
         ))
         .arg(
             Arg::new("storage-reserve")
@@ -690,25 +457,9 @@ pub fn build_cli() -> Command {
                 .hide_env(true)
                 .long("storage-reserve")
                 .value_name("size")
-                .help("Free bytes retained by storage-space-check [default: 0]"),
+                .help("Free bytes retained by storage-space-check [default: 5G]"),
         )
-        .arg(
-            Arg::new("storage-quota-hook")
-                .env("RAM_STORAGE_QUOTA_HOOK")
-                .hide_env(true)
-                .long("storage-quota-hook")
-                .value_parser(value_parser!(PathBuf))
-                .value_name("path")
-                .help("Trusted executable consulted before publishing PUT/PATCH/COPY"),
-        )
-        .arg(
-            Arg::new("storage-quota-hook-timeout")
-                .env("RAM_STORAGE_QUOTA_HOOK_TIMEOUT")
-                .hide_env(true)
-                .long("storage-quota-hook-timeout")
-                .value_name("duration")
-                .help("Maximum quota-hook runtime, bounded by request deadline [default: 5s]"),
-        )
+        .next_help_heading("Other")
         .arg(
             Arg::new("check-config")
                 .long("check-config")
@@ -722,39 +473,7 @@ pub fn build_cli() -> Command {
                 .value_name("shell")
                 .value_parser(value_parser!(Shell))
                 .help("Print shell completion script for <shell>"),
-        );
-
-    #[cfg(feature = "tls")]
-    let app = app
-        .arg(
-            Arg::new("tls-cert")
-                .env("RAM_TLS_CERT")
-                .hide_env(true)
-                .long("tls-cert")
-                .value_name("path")
-                .value_parser(value_parser!(PathBuf))
-                .help("Path to an SSL/TLS certificate to serve with HTTPS"),
         )
-        .arg(
-            Arg::new("tls-key")
-                .env("RAM_TLS_KEY")
-                .hide_env(true)
-                .long("tls-key")
-                .value_name("path")
-                .value_parser(value_parser!(PathBuf))
-                .help("Path to the SSL/TLS certificate's private key"),
-        )
-        .arg(
-            Arg::new("hsts-max-age")
-                .env("RAM_HSTS_MAX_AGE")
-                .hide_env(true)
-                .long("hsts-max-age")
-                .value_parser(value_parser!(u64))
-                .value_name("seconds")
-                .help("Emit Strict-Transport-Security on Ram's direct TLS listener; 0 clears a previous policy, hard maximum 63072000 seconds"),
-        );
-
-    app
 }
 
 pub fn print_completions<G: Generator>(generator: G, cmd: &mut Command) {

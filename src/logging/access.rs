@@ -10,7 +10,7 @@
 //!   这是 Rust 里"字符串 → 类型"的标准姿势。
 //! - **日志注入防御**：写进日志的一切外部输入（URL、用户名、请求头）
 //!   都要先经 `sanitize_log_value` 转义控制字符，防止恶意请求伪造日志行；
-//!   URL 里的 `token` 参数要打码，防止长期有效的令牌泄露到日志文件。
+//!   URL 里的 `token` 等凭据参数要打码，防止可复用 secret 泄露到日志。
 //!
 //! ## Rust concepts used here
 //! - **The `FromStr` trait**: implementing it makes
@@ -43,7 +43,6 @@ const SENSITIVE_LOG_HEADERS: &[&str] = &[
     "proxy-authorization",
     "cookie",
     "set-cookie",
-    "x-ram-revoke-token",
 ];
 
 /// 解析后的日志格式元素序列。 / Parsed log format as a sequence of render elements.
@@ -114,7 +113,7 @@ impl HttpLogger {
         data
     }
 
-    /// 只有认证/授权层完成密码、Digest 或下载令牌校验后，才允许把用户
+    /// 只有认证/授权层完成密码或 Digest 校验后，才允许把用户
     /// 写入访问日志。这样 `$remote_user` 既保留审计价值，也不会信任
     /// Authorization 头中未经验证的自报身份。
     /// Set remote_user only after authentication, preserving audit value without trusting a claimed header identity.
@@ -439,8 +438,8 @@ mod tests {
     #[test]
     fn non_sensitive_components_remain_readable_without_changing_boundaries() {
         assert_eq!(
-            redact_and_decode_uri("/hello%20world?name=a%26b%3Dc&tokengen"),
-            "/hello world?name=a&b=c&tokengen"
+            redact_and_decode_uri("/hello%20world?name=a%26b%3Dc&mode=compact"),
+            "/hello world?name=a&b=c&mode=compact"
         );
     }
 

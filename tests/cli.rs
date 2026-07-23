@@ -62,18 +62,3 @@ fn check_config_conflicts_with_completion_generation() -> Result<(), Error> {
         .stderr(predicates::str::contains("cannot be used with"));
     Ok(())
 }
-
-#[cfg(not(feature = "tls"))]
-#[test]
-fn tls_environment_is_rejected_without_tls_feature() -> Result<(), Error> {
-    Command::new(assert_cmd::cargo::cargo_bin!("ram"))
-        .env_remove("RAM_CONFIG")
-        .env("RAM_TLS_CERT", "cert.pem")
-        .env("RAM_TLS_KEY", "key.pem")
-        .args(["--check-config", "--auth", "user:pass@/:rw"])
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains("built without the `tls` feature"));
-
-    Ok(())
-}

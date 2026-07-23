@@ -55,19 +55,13 @@ use serde::{Deserialize, Deserializer};
 use smart_default::SmartDefault;
 use std::collections::HashSet;
 use std::env;
-#[cfg(test)]
-use std::fs::File;
 use std::io::Read;
 use std::net::IpAddr;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 
-use crate::auth::{AccessControl, TokenRevocationCapabilities};
-use crate::identity::{
-    ForwardedHeader, IpCidr, OutputPathIdentity, PathIdentity, ServedPathIdentity,
-    TrustedProxyPolicy,
-};
+use crate::auth::AccessControl;
+use crate::identity::{PathIdentity, ServedPathIdentity};
 use crate::logging::HttpLogger;
 use crate::utils::{encode_uri, is_ipv6_available, is_trusted_file_owner};
 
@@ -75,35 +69,14 @@ const PRIVATE_CONFIG_MAX_BYTES: u64 = 4 * 1024 * 1024;
 const AUTH_FILE_MAX_BYTES: u64 = 1024 * 1024;
 const AUTH_FILE_MAX_LINES: usize = 4096;
 const AUTH_FILE_MAX_LINE_BYTES: usize = 16 * 1024;
-const TOKEN_SECRET_FILE_MAX_BYTES: u64 = 64 * 1024;
 const PATH_PREFIX_MAX_BYTES: usize = 1024;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ParsePurpose {
-    Run,
-    Check,
-}
-
-// 中文：小型部署可以降低 WebDAV 预算，但远程输入绝不能把它提高到进程安全包络之外；
-// 硬上限放在配置层，使 CLI、环境变量和 YAML 的越界值在启动时被拒绝而非静默截断。
-// English: Operators may lower WebDAV budgets, but remote input must never
-// raise them beyond the process safety envelope. Reject excessive CLI, env,
-// and YAML values at startup instead of silently clamping them.
-pub(crate) const WEBDAV_HARD_MAX_PROPERTIES: u64 = 64;
-pub(crate) const WEBDAV_HARD_MAX_RENDERED_PROPERTIES: u64 = 64 * 1024;
-pub(crate) const WEBDAV_HARD_MAX_RESPONSE_SIZE: u64 = 8 * 1024 * 1024;
-const WEBDAV_MIN_RESPONSE_SIZE: u64 = 1024;
 pub(crate) const KEYED_UPLOAD_LIMIT_HARD_MAX: u64 = 1024;
 pub(crate) const KEYED_REQUEST_LIMIT_HARD_MAX: u64 = 4096;
-const TRUSTED_PROXY_MAX_ENTRIES: usize = 256;
 pub(crate) const STALE_UPLOAD_CLEANUP_MAX_ENTRIES_HARD_MAX: u64 = 1_000_000;
 pub(crate) const STALE_UPLOAD_CLEANUP_MAX_DEPTH_HARD_MAX: u64 = 256;
 pub(crate) const STALE_UPLOAD_CLEANUP_MAX_DELETIONS_HARD_MAX: u64 = 100_000;
 pub(crate) const STALE_UPLOAD_CLEANUP_TIMEOUT_HARD_MAX_SECS: u64 = 60;
-/// 两年是刻意设置的上限而非默认值；只有运维者为 Ram 自身 TLS 监听显式启用时才发送 HSTS。
-/// Two years is a ceiling, not a default; HSTS stays disabled unless explicitly enabled for Ram's TLS listener.
-pub(crate) const HSTS_MAX_AGE_HARD_MAX_SECS: u64 = 2 * 365 * 24 * 60 * 60;
-
 mod cli;
 mod path_resolution;
 mod schema;
@@ -112,8 +85,8 @@ mod validation;
 
 pub use cli::{build_cli, print_completions};
 #[allow(unused_imports)]
-pub(crate) use path_resolution::{StartupInputKind, StartupOutputKind, StartupPathIdentities};
-pub use schema::{Args, BindAddr, Compress, SecretValue};
+pub(crate) use path_resolution::StartupPathIdentities;
+pub use schema::{Args, BindAddr, Compress};
 #[cfg(feature = "fuzzing")]
 pub(crate) use validation::fuzz_path_prefix;
 pub(crate) use validation::normalize_path_prefix;

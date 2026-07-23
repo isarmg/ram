@@ -15,7 +15,6 @@ use super::{
     MutationGuards, MutationIntent, MutationLockKey, MutationLockMode, MutationLockRequest,
 };
 use crate::identity::ServedPathIdentity;
-use crate::utils::is_trusted_file_owner;
 use anyhow::{Context, Result, anyhow, bail};
 use rustix::fs::{
     self, AtFlags, Dir, FileType, FlockOperation, Mode, OFlags, RenameFlags, ResolveFlags, flock,
@@ -285,18 +284,6 @@ impl GuardedBlockingFile {
             .spawn_with_lease(lease, move || file.metadata());
         task.await
             .map_err(|error| io::Error::other(format!("metadata worker failed: {error}")))?
-    }
-
-    /// 仅在没有在途操作时交出同步描述符；所有生产调用都在已 await 的边界使用此转换。
-    /// Yield the synchronous descriptor only while idle; production callers convert after awaited boundaries.
-    pub(super) fn into_std(self) -> io::Result<File> {
-        match self.state {
-            GuardedBlockingFileState::Idle(file) => Ok(file),
-            _ => Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "cannot convert a guarded file while an operation is in flight",
-            )),
-        }
     }
 
     fn join_error(error: tokio::task::JoinError) -> io::Error {
@@ -720,9 +707,9 @@ struct CreatedTempCandidate {
     created_ancestors: Vec<CreatedAncestor>,
 }
 
-/// COPY/PATCH 所拥有阻塞任务使用的同步形式。其 Drop 在该工作线程中执行 unlink，因此在
+/// PUT 所拥有阻塞任务使用的同步形式。其 Drop 在该工作线程中执行 unlink，因此在
 /// 候选清理真正返回前，不会释放工作线程拥有的准入 permit。
-/// Synchronous form used by COPY/PATCH owned blocking jobs. Its Drop unlinks in that worker, so the
+/// Synchronous form used by PUT-owned blocking jobs. Its Drop unlinks in that worker, so the
 /// worker-owned admission permit cannot be released before cleanup actually returns.
 pub(super) struct BlockingTempFile {
     root: RootFs,
@@ -2015,10 +2002,7 @@ impl RootFs {
         )
     }
 
-    /// 生产服务根与自定义资源根通过此入口共享同一阻塞准入，而测试/静态启动校验仍可使用
-    /// 上方自含默认值的便捷构造器。
-    /// Production served/assets roots share one blocking admission through this constructor, while
-    /// tests and synchronous startup validation may use the self-contained convenience constructors.
+    /// 生产服务根通过此入口复用进程级阻塞准入。
     pub(super) fn from_verified_identity_with_candidate_cleanup_and_admission(
         expected: &ServedPathIdentity,
         allow_symlink: bool,
@@ -2071,61 +2055,6 @@ impl RootFs {
             .single_file
             .as_ref()
             .map(|single| PathBuf::from(&single.name))
-    }
-
-    pub(super) fn read_to_string_limited(
-        &self,
-        rel: impl Into<PathBuf>,
-        max_bytes: usize,
-    ) -> Result<String> {
-        let rel = rel.into();
-        self.check_public_rel(&rel)?;
-        let mut file = self.open_with_symlink_policy(&rel, NodeKind::File)?;
-        let metadata = file.metadata()?;
-        if !metadata.is_file() {
-            bail!("resource is not a regular file");
-        }
-        if metadata.len() > max_bytes as u64 {
-            bail!("resource exceeds the {max_bytes}-byte limit");
-        }
-        self.real_relative_verified(&file)?;
-        let mut output = String::new();
-        Read::by_ref(&mut file)
-            .take(max_bytes.saturating_add(1) as u64)
-            .read_to_string(&mut output)?;
-        if output.len() > max_bytes {
-            bail!("resource exceeds the {max_bytes}-byte limit");
-        }
-        Ok(output)
-    }
-
-    /// 启动时验证完整自定义资源能力。运行时在同一已打开描述符上重复普通文件检查，避免之后
-    /// 路径替换绕过信任判定。
-    /// Validate the complete custom-assets capability at startup. Runtime serving repeats the
-    /// regular-file check on the same descriptor so later path replacement cannot bypass trust.
-    pub(super) fn validate_trusted_asset_tree(
-        &self,
-        max_entries: usize,
-        max_depth: usize,
-    ) -> Result<()> {
-        validate_trusted_asset_metadata(&self.inner.root.metadata()?, true, Path::new("."))?;
-        let running = AtomicBool::new(true);
-        let cancelled = AtomicBool::new(false);
-        self.walk_fail_closed(
-            vec![PathBuf::new()],
-            &running,
-            &cancelled,
-            max_entries,
-            max_depth,
-            |entry| {
-                validate_trusted_asset_metadata(
-                    &entry.metadata,
-                    entry.metadata.is_dir(),
-                    &entry.display_rel,
-                )?;
-                Ok(WalkAction::Continue)
-            },
-        )
     }
 
     pub(super) async fn open(&self, rel: impl Into<PathBuf>, kind: NodeKind) -> Result<OpenedNode> {
@@ -2332,30 +2261,6 @@ impl RootFs {
         )
     }
 
-    fn walk_fail_closed<F>(
-        &self,
-        roots: Vec<PathBuf>,
-        running: &AtomicBool,
-        cancelled: &AtomicBool,
-        max_entries: usize,
-        max_depth: usize,
-        mut visitor: F,
-    ) -> Result<()>
-    where
-        F: FnMut(&mut WalkEntry) -> Result<WalkAction>,
-    {
-        self.walk_with_unavailable_policy(
-            roots,
-            running,
-            cancelled,
-            max_entries,
-            max_depth,
-            true,
-            &mut |_, _, _| Ok(true),
-            &mut visitor,
-        )
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn walk_with_unavailable_policy<R, F>(
         &self,
@@ -2490,9 +2395,9 @@ impl RootFs {
             })?
     }
 
-    /// 完全在调用方阻塞工作线程内创建发布候选。COPY/PATCH 使用此入口，使工作线程拥有的昂贵
+    /// 完全在调用方阻塞工作线程内创建发布候选。PUT 使用此入口，使工作线程拥有的昂贵
     /// 操作 permit 以不可分割生命周期覆盖父解析、`openat(O_EXCL)`、传输、提交和同步清理。
-    /// Create a publication candidate entirely in the caller's blocking worker. COPY/PATCH use it so
+    /// Create a publication candidate entirely in the caller's blocking worker. PUT uses it so
     /// one worker-owned expensive permit covers resolution, O_EXCL, transfer, commit, and cleanup.
     pub(super) fn create_blocking_temp(
         &self,
@@ -2691,10 +2596,11 @@ impl RootFs {
         })
     }
 
-    /// 同时重新验证保留描述符和预期指向它的命名空间条目。COPY 在传输前后都执行，避免外部
+    /// 同时重新验证保留描述符和预期指向它的命名空间条目，避免外部
     /// 替换悄然改变所选源。
-    /// Revalidate both a retained descriptor and the namespace entry expected to name it. COPY does
-    /// this before and after transfer so external replacement cannot silently change the source.
+    /// Revalidate both a retained descriptor and the namespace entry expected to name it so an
+    /// external replacement cannot silently change the selected object.
+    #[cfg(test)]
     pub(super) fn verify_opened_entry_sync(
         &self,
         rel: &Path,
@@ -2720,10 +2626,9 @@ impl RootFs {
         Ok(metadata)
     }
 
-    /// 不跟随最终组件地返回当前目标条目的逻辑大小。该同步形式在拥有所有权的 COPY 工作线程
-    /// 内使用，使配额钩子核算与发布处于相同变更守卫和昂贵操作 permit 下。
-    /// Return the destination entry's logical size without following its final component. The owned
-    /// COPY worker uses this so quota accounting and publication share guards and expensive permit.
+    /// 不跟随最终组件地返回当前目标条目的逻辑大小。
+    /// Return the destination entry's logical size without following its final component.
+    #[cfg(test)]
     pub(super) fn entry_size_nofollow(&self, rel: &Path) -> Result<Option<u64>> {
         let parent = match self.open_parent_sync(rel, false) {
             Ok(parent) => parent,
@@ -4086,36 +3991,6 @@ impl RootFs {
             anyhow!("opened object changed during verification: {last_detail}"),
         )))
     }
-}
-
-pub(super) fn validate_opened_trusted_asset(metadata: &Metadata, path: &Path) -> Result<()> {
-    validate_trusted_asset_metadata(metadata, false, path)
-}
-
-fn validate_trusted_asset_metadata(
-    metadata: &Metadata,
-    directory: bool,
-    path: &Path,
-) -> Result<()> {
-    if directory {
-        if !metadata.is_dir() {
-            bail!("trusted asset is not a directory: {:?}", path);
-        }
-    } else {
-        if !metadata.is_file() {
-            bail!("trusted asset is not a regular file: {:?}", path);
-        }
-        if metadata.nlink() != 1 {
-            bail!("trusted asset has hard-link aliases: {:?}", path);
-        }
-    }
-    if metadata.mode() & 0o022 != 0 {
-        bail!("trusted asset is group/world writable: {:?}", path);
-    }
-    if !is_trusted_file_owner(metadata.uid()) {
-        bail!("trusted asset has an untrusted owner: {:?}", path);
-    }
-    Ok(())
 }
 
 #[derive(Clone, Copy, Debug)]

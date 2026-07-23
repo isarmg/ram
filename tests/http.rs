@@ -14,7 +14,6 @@ use std::io::{Cursor, Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::os::unix::ffi::OsStrExt;
 use std::time::Duration;
-use utils::retrieve_edit_file;
 
 #[rstest]
 fn get_dir(server: TestServer) -> Result<(), Error> {
@@ -75,20 +74,17 @@ fn existing_special_node_with_trailing_slash_is_not_a_missing_directory(
     let response = reqwest::blocking::get(&target)?;
     assert_eq!(response.status(), 404);
 
-    // 三个只读查找方法都隐藏不可表示的节点；OPTIONS 仍从同一能力表声明可路由方法。
-    // All three read-only lookups hide an unrepresentable node; OPTIONS advertises routable methods
-    // from that same capability table.
+    // 两个只读查找方法都隐藏不可表示的节点；OPTIONS 仍从同一能力表声明可路由方法。
+    // Both read-only lookups hide an unrepresentable node; OPTIONS advertises routable methods from
+    // that same capability table.
     let head = fetch!(b"HEAD", &target).send()?;
     assert_eq!(head.status(), 404);
-    let propfind = fetch!(b"PROPFIND", &target).send()?;
-    assert_eq!(propfind.status(), 404);
     let options = fetch!(b"OPTIONS", &target).send()?;
     assert_eq!(options.status(), 200);
     let allow = options.headers().get("allow").unwrap().to_str()?;
-    for method in ["GET", "HEAD", "PROPFIND"] {
+    for method in ["GET", "HEAD"] {
         assert!(allow.split(", ").any(|candidate| candidate == method));
     }
-    assert!(!allow.split(", ").any(|method| method == "PROPPATCH"));
 
     let missing = reqwest::blocking::get(format!("{}new-directory/", server.url()))?;
     assert_eq!(missing.status(), 200);
@@ -338,22 +334,6 @@ fn get_dir_simple(#[with(&["-A"])] server: TestServer) -> Result<(), Error> {
 }
 
 #[rstest]
-fn legacy_noscript_query_does_not_enable_removed_renderer(
-    #[with(&["-A"])] server: TestServer,
-) -> Result<(), Error> {
-    let resp = reqwest::blocking::get(format!("{}?noscript", server.url()))?;
-    assert_eq!(resp.status(), 200);
-    assert_eq!(
-        resp.headers().get("content-type").unwrap(),
-        "text/html; charset=utf-8"
-    );
-    let text = resp.text().unwrap();
-    assert!(text.contains(r#"<template id="index-data">"#));
-    assert!(!text.contains(r#"<td><a href="index.html">index.html</a></td>"#));
-    Ok(())
-}
-
-#[rstest]
 fn head_dir_zip(#[with(&["-A"])] server: TestServer) -> Result<(), Error> {
     let resp = fetch!(b"HEAD", format!("{}?zip", server.url())).send()?;
     assert_eq!(resp.status(), 200);
@@ -444,22 +424,6 @@ fn get_file(server: TestServer) -> Result<(), Error> {
 }
 
 #[rstest]
-fn get_file_json(server: TestServer) -> Result<(), Error> {
-    let resp = reqwest::blocking::get(format!("{}index.html?json", server.url()))?;
-    assert_eq!(resp.status(), 200);
-    assert_eq!(
-        resp.headers().get("content-type").unwrap(),
-        "application/json"
-    );
-    let json: Value = serde_json::from_str(&resp.text()?).unwrap();
-    assert_eq!(json["name"], "index.html");
-    assert_eq!(json["path_type"], "File");
-    assert!(json["size"].as_u64().is_some());
-    assert!(json["mtime"].as_u64().is_some());
-    Ok(())
-}
-
-#[rstest]
 fn head_file(server: TestServer) -> Result<(), Error> {
     let resp = fetch!(b"HEAD", format!("{}index.html", server.url())).send()?;
     assert_eq!(resp.status(), 200);
@@ -477,28 +441,6 @@ fn head_file(server: TestServer) -> Result<(), Error> {
 }
 
 #[rstest]
-fn hash_file(#[with(&["--allow-hash"])] server: TestServer) -> Result<(), Error> {
-    let resp = reqwest::blocking::get(format!("{}index.html?hash", server.url()))?;
-    assert_eq!(
-        resp.headers().get("content-type").unwrap(),
-        "text/plain; charset=utf-8"
-    );
-    assert_eq!(resp.status(), 200);
-    assert_eq!(
-        resp.text()?,
-        "c8dd395e3202674b9512f7b7f956e0d96a8ba8f572e785b0d5413ab83766dbc4"
-    );
-    Ok(())
-}
-
-#[rstest]
-fn no_hash_file(server: TestServer) -> Result<(), Error> {
-    let resp = reqwest::blocking::get(format!("{}index.html?hash", server.url()))?;
-    assert_eq!(resp.status(), 403);
-    Ok(())
-}
-
-#[rstest]
 fn get_file_404(server: TestServer) -> Result<(), Error> {
     let resp = reqwest::blocking::get(format!("{}404", server.url()))?;
     assert_eq!(resp.status(), 404);
@@ -512,6 +454,17 @@ fn get_file_emoji_path(server: TestServer) -> Result<(), Error> {
     assert_eq!(
         resp.headers().get("content-disposition").unwrap(),
         "inline; filename=\"😀.bin\"; filename*=UTF-8''%F0%9F%98%80.bin"
+    );
+    Ok(())
+}
+
+#[rstest]
+fn get_file_download_forces_attachment(server: TestServer) -> Result<(), Error> {
+    let resp = reqwest::blocking::get(format!("{}{BIN_FILE}?download", server.url()))?;
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers().get("content-disposition").unwrap(),
+        "attachment; filename=\"😀.bin\"; filename*=UTF-8''%F0%9F%98%80.bin"
     );
     Ok(())
 }
@@ -541,20 +494,20 @@ fn get_file_quoted_path(server: TestServer) -> Result<(), Error> {
 }
 
 #[rstest]
-fn get_file_edit(server: TestServer) -> Result<(), Error> {
-    let resp = fetch!(b"GET", format!("{}index.html?edit", server.url())).send()?;
+fn get_file_view(server: TestServer) -> Result<(), Error> {
+    let resp = fetch!(b"GET", format!("{}index.html?view", server.url())).send()?;
     assert_eq!(resp.status(), 200);
-    let editable = retrieve_edit_file(&resp.text().unwrap()).unwrap();
-    assert!(editable);
+    let view = utils::retrieve_json(&resp.text()?).expect("embedded viewer data");
+    assert_eq!(view["text_viewable"], true);
     Ok(())
 }
 
 #[rstest]
-fn get_file_edit_bin(server: TestServer) -> Result<(), Error> {
-    let resp = fetch!(b"GET", format!("{}{BIN_FILE}?edit", server.url())).send()?;
+fn get_file_view_bin(server: TestServer) -> Result<(), Error> {
+    let resp = fetch!(b"GET", format!("{}{BIN_FILE}?view", server.url())).send()?;
     assert_eq!(resp.status(), 200);
-    let editable = retrieve_edit_file(&resp.text().unwrap()).unwrap();
-    assert!(!editable);
+    let view = utils::retrieve_json(&resp.text()?).expect("embedded viewer data");
+    assert_eq!(view["text_viewable"], false);
     Ok(())
 }
 
@@ -571,9 +524,8 @@ fn options_dir(server: TestServer) -> Result<(), Error> {
     assert_eq!(resp.status(), 200);
     assert_eq!(
         resp.headers().get("allow").unwrap(),
-        "GET, HEAD, OPTIONS, PROPFIND, PROPPATCH, CHECKAUTH, LOGOUT"
+        "GET, HEAD, OPTIONS, CHECKAUTH, LOGOUT"
     );
-    // Ram 只声明有限 DAV 子集，不得声称数字 class 1。 / Ram documents a finite DAV subset and must not claim numeric class 1.
     assert!(!resp.headers().contains_key("dav"));
     Ok(())
 }
@@ -718,21 +670,5 @@ fn get_file_content_type(server: TestServer) -> Result<(), Error> {
         resp.headers().get("content-type").unwrap(),
         "text/plain; charset=UTF-8"
     );
-    Ok(())
-}
-
-#[rstest]
-fn resumable_upload(#[with(&["--allow-upload"])] server: TestServer) -> Result<(), Error> {
-    let url = format!("{}file1", server.url());
-    let resp = fetch!(b"PUT", &url).body(b"abc".to_vec()).send()?;
-    assert_eq!(resp.status(), 201);
-    let resp = fetch!(b"PATCH", &url)
-        .header("X-Update-Range", "append")
-        .body(b"123".to_vec())
-        .send()?;
-    assert_eq!(resp.status(), 204);
-    let resp = reqwest::blocking::get(url)?;
-    assert_eq!(resp.status(), 200);
-    assert_eq!(resp.text().unwrap(), "abc123");
     Ok(())
 }

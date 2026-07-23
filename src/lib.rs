@@ -51,12 +51,6 @@ pub mod fuzzing {
         crate::server::fuzz_range_if_range(data);
     }
 
-    /// 用同一任意输入覆盖两种有界 DAV XML 请求语法及响应名称渲染。
-    /// Exercise both bounded DAV XML request grammars and their response-name rendering using one arbitrary input.
-    pub fn webdav_xml(data: &[u8]) {
-        crate::server::fuzz_webdav_xml(data);
-    }
-
     /// 把 Destination/Host 同源校验与 URI 前缀规范化作为一个路由边界覆盖。
     /// Exercise Destination/Host same-origin validation and URI-prefix normalization as one routing boundary.
     pub fn destination_host_prefix(data: &[u8]) {

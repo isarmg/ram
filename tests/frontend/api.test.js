@@ -4,7 +4,6 @@ import {
   DownloadTooLargeError,
   MAX_API_ERROR_BODY_BYTES,
   MAX_AUTHENTICATED_USERNAME_BYTES,
-  MAX_BEARER_TOKEN_BYTES,
   MAX_BUFFERED_RESPONSE_CHUNKS,
   REQUEST_TOTAL_TIMEOUT_MS,
   ResponseChunkLimitError,
@@ -12,7 +11,6 @@ import {
   checkAuthentication,
   createDirectory,
   deleteResource,
-  downloadWithToken,
   logOut,
   moveResource,
   readBoundedDownloadBlob,
@@ -103,11 +101,10 @@ function abortOnlyFetch() {
   }));
 }
 
-test("DELETE and MOVE keep listing versions and editor source ETags mutually exclusive", async () => {
+test("DELETE and MOVE forward only validated listing mutation versions", async () => {
   const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
   vi.stubGlobal("fetch", fetchMock);
   const version = "00000000-0000-0000-0000-000000000001.42";
-  const editorEtag = '"editor-version"';
 
   await deleteResource("/from-listing", version);
   let [, init] = fetchMock.mock.calls.at(-1);
@@ -122,30 +119,15 @@ test("DELETE and MOVE keep listing versions and editor source ETags mutually exc
   expect(moveHeaders.get("overwrite")).toBe("F");
   expect(moveHeaders.get("x-ram-if-mutation-version")).toBe(version);
 
-  await deleteResource("/editor-delete", undefined, editorEtag);
-  [, init] = fetchMock.mock.calls.at(-1);
-  let editorHeaders = new Headers(init.headers);
-  expect(editorHeaders.get("if-match")).toBe(editorEtag);
-  expect(editorHeaders.has("x-ram-if-mutation-version")).toBe(false);
-
-  await moveResource("/editor-source", "/editor-destination", false, undefined, editorEtag);
-  [, init] = fetchMock.mock.calls.at(-1);
-  editorHeaders = new Headers(init.headers);
-  expect(editorHeaders.get("if-match")).toBe(editorEtag);
-  expect(editorHeaders.has("x-ram-if-mutation-version")).toBe(false);
-
   await deleteResource("/headerless-delete");
   [, init] = fetchMock.mock.calls.at(-1);
-  expect(new Headers(init.headers).has("if-match")).toBe(false);
+  expect(new Headers(init.headers).has("x-ram-if-mutation-version")).toBe(false);
   await moveResource("/headerless-source", "/headerless-destination", false);
   [, init] = fetchMock.mock.calls.at(-1);
-  expect(new Headers(init.headers).has("if-match")).toBe(false);
+  expect(new Headers(init.headers).has("x-ram-if-mutation-version")).toBe(false);
 
   expect(() => deleteResource("/invalid", "")).toThrow(/mutationVersion/);
-  expect(() => deleteResource("/weak", undefined, 'W/"weak"')).toThrow(/sourceEtag/);
-  expect(() => deleteResource("/conflicting", version, editorEtag)).toThrow(/mutually exclusive/);
-  expect(() => moveResource("/conflicting", "/destination", false, version, editorEtag))
-    .toThrow(/mutually exclusive/);
+  expect(() => moveResource("/invalid", "/destination", false, "")).toThrow(/mutationVersion/);
 });
 
 describe("bounded browser downloads", () => {
@@ -331,21 +313,13 @@ describe("bounded browser downloads", () => {
     expect(cancelled).toBe(true);
   });
 
-  test("bounds authenticated names and generated bearer tokens before use", async () => {
+  test("bounds authenticated names before use", async () => {
     const usernameFetch = vi.fn(async () => streamedResponse([
       new Uint8Array(MAX_AUTHENTICATED_USERNAME_BYTES + 1).fill(97),
     ]));
     vi.stubGlobal("fetch", usernameFetch);
     await expect(checkAuthentication("/private"))
       .rejects.toBeInstanceOf(DownloadTooLargeError);
-
-    const tokenFetch = vi.fn(async () => streamedResponse([
-      new Uint8Array(MAX_BEARER_TOKEN_BYTES + 1).fill(97),
-    ]));
-    vi.stubGlobal("fetch", tokenFetch);
-    await expect(downloadWithToken("/private", 4))
-      .rejects.toBeInstanceOf(DownloadTooLargeError);
-    expect(tokenFetch).toHaveBeenCalledTimes(1);
   });
 });
 

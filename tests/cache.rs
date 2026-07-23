@@ -98,8 +98,8 @@ fn put_file_with_if_match(
     #[case] expected_code: StatusCode,
     #[with(&["-A"])] server: TestServer,
 ) -> Result<(), Error> {
-    // 获取当前 ETag 后用 If-Match 条件覆盖；过期 ETag 必须以 412 拒绝（编辑器并发保存守卫）。
-    // Fetch the ETag then overwrite with If-Match; a stale tag must return 412 as the editor guard.
+    // 获取当前 ETag 后用 If-Match 条件覆盖；过期 ETag 必须以 412 拒绝并发覆盖。
+    // Fetch the ETag then overwrite with If-Match; a stale tag must reject concurrent replacement.
     let resp = fetch!(b"HEAD", format!("{}test.txt", server.url())).send()?;
     let etag = resp
         .headers()
@@ -341,16 +341,10 @@ fn request_for_write_method(
         .headers(headers);
     request = match method.as_str() {
         "PUT" => request.body("rejected replacement"),
-        "PATCH" => request
-            .header("X-Update-Range", "append")
-            .body("rejected append"),
-        "COPY" | "MOVE" => request.header(
+        "MOVE" => request.header(
             "Destination",
             format!("{}condition-destination", server.url()),
         ),
-        "PROPPATCH" => request
-            .header("Content-Type", "application/xml")
-            .body(r#"<D:propertyupdate xmlns:D="DAV:"/>"#),
         _ => request,
     };
     Ok(request)
@@ -372,15 +366,7 @@ fn every_write_method_rejects_malformed_conditions_without_side_effects(
         .cloned()
         .expect("fixture file has an ETag");
 
-    for method in [
-        b"PUT".as_slice(),
-        b"PATCH",
-        b"DELETE",
-        b"COPY",
-        b"MOVE",
-        b"MKCOL",
-        b"PROPPATCH",
-    ] {
+    for method in [b"PUT".as_slice(), b"DELETE", b"MOVE", b"MKCOL"] {
         for (case, headers) in malformed_condition_cases()? {
             let source = if method == b"MKCOL" {
                 "condition-collection"
@@ -429,12 +415,9 @@ fn malformed_conditions_win_over_missing_target_for_every_write_method(
 
     for (method, source) in [
         (b"PUT".as_slice(), "missing-parent/new.txt"),
-        (b"PATCH".as_slice(), "missing-patch"),
         (b"DELETE".as_slice(), "missing-delete"),
-        (b"COPY".as_slice(), "missing-copy"),
         (b"MOVE".as_slice(), "missing-move"),
         (b"MKCOL".as_slice(), "missing-collection"),
-        (b"PROPPATCH".as_slice(), "missing-property"),
     ] {
         let response =
             request_for_write_method(&client, &server, method, source, headers.clone())?.send()?;
@@ -461,12 +444,9 @@ fn if_match_on_a_missing_target_is_412_for_every_write_method(
 
     for (method, source) in [
         (b"PUT".as_slice(), "absent-put"),
-        (b"PATCH".as_slice(), "absent-patch"),
         (b"DELETE".as_slice(), "absent-delete"),
-        (b"COPY".as_slice(), "absent-copy"),
         (b"MOVE".as_slice(), "absent-move"),
         (b"MKCOL".as_slice(), "absent-collection"),
-        (b"PROPPATCH".as_slice(), "absent-property"),
     ] {
         let response =
             request_for_write_method(&client, &server, method, source, headers.clone())?.send()?;
@@ -504,11 +484,8 @@ fn missing_target_without_conditions_is_404_for_existing_only_methods(
     }
 
     for (method, source) in [
-        (b"PATCH".as_slice(), "absent-unconditional-patch"),
         (b"DELETE".as_slice(), "absent-unconditional-delete"),
-        (b"COPY".as_slice(), "absent-unconditional-copy"),
         (b"MOVE".as_slice(), "absent-unconditional-move"),
-        (b"PROPPATCH".as_slice(), "absent-unconditional-property"),
     ] {
         let response =
             request_for_write_method(&client, &server, method, source, HeaderMap::new())?.send()?;
@@ -695,13 +672,7 @@ fn authenticated_cache_policy_separates_downloads_from_dynamic_views(
         "private, revalidated responses do not need Vary: Authorization"
     );
 
-    for relative in [
-        "?simple",
-        "?json",
-        "test.txt?json",
-        "test.txt?edit",
-        "test.txt?hash",
-    ] {
+    for relative in ["?simple", "?json", "test.txt?view"] {
         let response = fetch!(b"GET", format!("{}{relative}", server.url())).send()?;
         assert_eq!(response.status(), StatusCode::OK, "{relative}");
         let policy = response.headers().get(CACHE_CONTROL).unwrap().to_str()?;
@@ -709,38 +680,22 @@ fn authenticated_cache_policy_separates_downloads_from_dynamic_views(
         assert!(policy.contains("no-store"), "{relative}: {policy}");
     }
 
-    let dav = fetch!(b"PROPFIND", server.url())
-        .header("depth", "0")
-        .send()?;
-    assert_eq!(dav.status(), 207);
-    let dav_policy = dav.headers().get(CACHE_CONTROL).unwrap().to_str()?;
-    assert!(dav_policy.contains("private"), "{dav_policy}");
-    assert!(dav_policy.contains("no-store"), "{dav_policy}");
     Ok(())
 }
 
 /// 每个动态 GET 表示都拥有由最终字节派生的强验证器。HEAD 必须选择同一组字节（但不发送），
-/// 因而无论从哪种方法取得验证器，目录、元数据、编辑/查看、搜索和哈希视图都具有完全一致的
+/// 因而无论从哪种方法取得验证器，目录、元数据、查看和搜索视图都具有完全一致的
 /// 200/304/412 语义。
 ///
 /// Every generated GET representation owns a byte-derived strong validator. HEAD must select the
 /// same bytes (without sending them), so a validator learned through either method has identical
-/// 200/304/412 semantics for directory, metadata, editor/viewer, search, and hash views.
+/// 200/304/412 semantics for directory, metadata, viewer, and search views.
 #[rstest]
 fn generated_get_and_head_views_share_exact_conditional_semantics(
-    #[with(&["--allow-search", "--allow-hash"])] server: TestServer,
+    #[with(&["--allow-search"])] server: TestServer,
 ) -> Result<(), Error> {
     let client = reqwest::blocking::Client::new();
-    for relative in [
-        "",
-        "?simple",
-        "?json",
-        "?q=test",
-        "test.txt?json",
-        "test.txt?edit",
-        "test.txt?view",
-        "test.txt?hash",
-    ] {
+    for relative in ["", "?simple", "?json", "?q=test", "test.txt?view"] {
         let url = format!("{}{relative}", server.url());
         let get = client.get(&url).send()?;
         assert_eq!(get.status(), StatusCode::OK, "GET {relative}");

@@ -6,9 +6,7 @@
 //! 2. [`AccessPaths`]：一棵"路径前缀 → 权限"的树，实现目录级的
 //!    仅索引（IndexOnly）/ 只读（ReadOnly）/ 读写（ReadWrite）三级权限；
 //! 3. HTTP 认证协议实现：Basic（明文密码，可配合 Argon2id/SHA-512-crypt 哈希存储）
-//!    与 Digest（挑战-响应，密码不上线），外加基于 HMAC-SHA256 的
-//!    短期下载令牌（`?tokengen` 签发，`Authorization: Bearer`
-//!    携带）。
+//!    与 Digest（挑战-响应，密码不上线）。
 //!
 //! ## 本模块的 Rust 知识点
 //! - **层级数据结构**：`AccessPaths` 的 children 是 `IndexMap<String,
@@ -22,10 +20,7 @@
 //! ## 安全设计要点（值得细读）
 //! - Digest 的 nonce 有时效（5 分钟）且掺入服务器私有随机量，限制重放；
 //! - 校验 Digest 的 `uri` 字段必须等于真实请求目标，防止"路径 A 的
-//!   认证头被重放到路径 B"；
-//! - 下载令牌绑定 audience/用户/路径/过期时间/jti，使用
-//!   独立于用户密码的 HMAC 密钥；默认密钥和 audience 均为进程级
-//!   CSPRNG 随机值，也可显式配置持久化。
+//!   认证头被重放到路径 B"。
 //!
 //! ## English overview
 //! Authentication answers who the caller is; authorization determines which paths that identity
@@ -37,8 +32,7 @@
 //! 2. [`AccessPaths`] is a “path prefix → permission” tree implementing directory-level IndexOnly,
 //!    ReadOnly, and ReadWrite permissions;
 //! 3. the HTTP authentication protocols implement Basic with plaintext or Argon2id/SHA-512-crypt
-//!    password storage, challenge-response Digest that never sends the password, and short-lived
-//!    HMAC-SHA256 download tokens issued by `?tokengen` and carried by `Authorization: Bearer`.
+//!    password storage and challenge-response Digest that never sends the password.
 //!
 //! ## Rust concepts in this module
 //! - **Hierarchical data structures**: `AccessPaths.children` is an `IndexMap<String, AccessPaths>`.
@@ -53,78 +47,55 @@
 //! ## Security design points
 //! - Digest nonces expire after five minutes and mix in server-private randomness to limit replay;
 //! - the Digest `uri` field must equal the real request target, preventing a captured authorization
-//!   header for path A from being replayed against path B;
-//! - download tokens bind audience, user, path, expiry, and JTI under an HMAC key independent of user
-//!   passwords. The default key and audience are process-random CSPRNG values, with explicit durable
-//!   configuration available.
+//!   header for path A from being replayed against path B.
 
-use crate::{
-    config::Args,
-    identity::{ObjectIdentity, OutputPathIdentity, SourceIdentity},
-    server::Response,
-    utils::{is_trusted_file_owner, unix_now},
-};
+use crate::{config::Args, identity::SourceIdentity, server::Response, utils::unix_now};
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use argon2::{
     Argon2, Params as Argon2Params, PasswordHash as Argon2PasswordHash,
     PasswordVerifier as Argon2PasswordVerifier,
 };
-use base64::{
-    Engine as _,
-    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
-};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use headers::HeaderValue;
 use hmac::{Hmac, KeyInit, Mac};
 use hyper::{Method, header::WWW_AUTHENTICATE};
 use indexmap::IndexMap;
-use rustix::fs::{self as rustix_fs, AtFlags, FlockOperation, Mode, OFlags, flock};
-use serde::{Deserialize, Serialize};
 use sha_crypt::PasswordVerifier as ShaCryptPasswordVerifier;
 use sha2::{Digest, Sha256};
 use std::{
     borrow::Cow,
     cmp::Reverse,
     collections::{BinaryHeap, HashMap},
-    ffi::OsString,
-    fmt, fs,
-    io::{Read, Write},
-    os::unix::fs::MetadataExt,
+    fmt,
     path::{Path, PathBuf},
-    sync::{
-        Arc, Mutex, OnceLock,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
-use uuid::Uuid;
 
 #[cfg(test)]
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 mod acl;
 mod basic;
 mod digest;
 mod rate_limit;
-mod token;
 
 use acl::AccessPathBudget;
 pub use acl::{AccessPaths, AccessPerm};
 #[cfg(feature = "fuzzing")]
 pub(crate) use digest::fuzz_digest_auth_params;
-pub(crate) use token::{TokenRevocationCapabilities, TokenRevokeError};
 
 use basic::*;
 use digest::*;
 use rate_limit::*;
-use token::*;
 
 const REALM: &str = "RAM";
 // 中文：Digest nonce 窗口为 300 秒；期间记录 user+nonce+cnonce+nc 并拒绝精确重放，
-// 不同未用 nc 可乱序到达以兼容 HTTP/2 并发。
+// 不同未用 nc 可乱序到达以兼容并发请求。
 // English: Digest nonces live 300 seconds. Exact tuples are replay-protected,
-// while distinct unused nc values may arrive out of order for HTTP/2 concurrency.
+// while distinct unused nc values may arrive out of order across concurrent requests.
 const DIGEST_AUTH_TIMEOUT: u64 = 60 * 5; // 5 分钟 / 5 minutes
 /// 每个进程最多记录的已用 Digest `(nonce,user,cnonce,nc)` 数。
 /// 65536 能容纳 nonce 的 5 分钟窗口内约 218 req/s 的 Digest 流量，
@@ -166,26 +137,13 @@ const AUTH_ACL_PATH_MAX_DEPTH: usize = 256;
 /// Exact variable-byte bound for attacker-controlled replay keys (24 MiB by default); fixed map/heap metadata is O(capacity), never O(input).
 const DIGEST_REPLAY_MAX_DYNAMIC_KEY_BYTES: usize =
     DIGEST_REPLAY_CAPACITY * (AUTH_USERNAME_MAX_LEN + DIGEST_CNONCE_MAX_LEN);
-pub const DEFAULT_TOKEN_TTL_SECS: u64 = 15 * 60;
-const TOKEN_VERSION: u8 = 1;
-/// 撤销文件是独立版本化持久格式，不得继承签名 claims 格式变更。
-/// The revocation file is independently versioned and must not inherit signed-claim format changes.
-const REVOCATION_FORMAT_V1: u64 = 1;
-const REVOCATION_FORMAT_CURRENT: u64 = 2;
-const TOKEN_SECRET_BYTES: usize = 32;
-const TOKEN_REVOCATION_CAPACITY: usize = 65_536;
-// 中文：65,536 个 32-byte JTI 加 u64 expiry 远低于此上限；JSON 分配前限制启动读取，
-// 防止损坏的可信状态文件消耗无界内存。
-// English: 65,536 JTIs plus expiries fit well below this cap. Bound reads before JSON allocation so corrupt trusted state cannot exhaust memory.
-const TOKEN_REVOCATION_FILE_MAX_BYTES: u64 = 8 * 1024 * 1024;
+/// Digest nonce 种子密钥长度（字节）。 / Length in bytes of the Digest nonce seed key.
+const NONCE_KEY_BYTES: usize = 32;
 const AUTH_RATE_CAPACITY: usize = 16_384;
 const AUTH_RATE_FREE_FAILURES: u32 = 4;
 /// 中文：首字节不是合法 UTF-8，保证协议域键不可能与直接哈希的配置用户名碰撞。
 /// English: The invalid-UTF-8 first byte prevents protocol-domain keys from colliding with a
 /// directly hashed configured username.
-const BEARER_SUBJECT_RATE_DOMAIN: &[u8] = b"\xffbearer-subject\0";
-const BEARER_INVALID_RATE_DOMAIN: &[u8] = b"\xffbearer-invalid\0";
-const TOKEN_REVOKE_RATE_DOMAIN: &[u8] = b"\xfftoken-revoke\0";
 /// 密码用户名桶只取决于来源和声明名，不取决于查表结果；known/unknown 因此没有分区差异。
 /// Password principal buckets depend only on source and claimed name, never lookup results, so
 /// known and unknown accounts follow exactly the same partition rule.
@@ -195,8 +153,6 @@ const PASSWORD_PRINCIPAL_RATE_DOMAIN: &[u8] = b"\xffpassword-principal\0";
 /// and low-privilege-success laundering of prior failures.
 const PASSWORD_SOURCE_RATE_DOMAIN: &[u8] = b"\xffpassword-source\0";
 const PASSWORD_ADMISSION_DOMAIN: &[u8] = b"\xffpassword-admission\0";
-const BEARER_REVOCATION_ADMISSION_DOMAIN: &[u8] = b"\xffbearer-revocation-admission\0";
-const TOKEN_REVOKE_ADMISSION_DOMAIN: &[u8] = b"\xfftoken-revoke-admission\0";
 const PASSWORD_VERIFY_QUEUE_TIMEOUT: Duration = Duration::from_secs(1);
 /// SHA-512-crypt 可接受极端 rounds；误配会让每请求独占 CPU 数分钟，故 Ram 仅作兼容验证并在启动时拒绝超过运维上限的 profile。
 /// SHA-512-crypt permits extreme rounds; Ram keeps compatibility but rejects profiles above the operational ceiling at startup.
@@ -236,35 +192,41 @@ const PASSWORD_VERIFY_RETRY_AFTER_SECS: u64 = 1;
 
 // 中文：Digest nonce 种子键由进程随机值生成；每次重启不同，旧 nonce 自动失效。
 // English: The process-random Digest nonce key changes on restart, invalidating every old-process nonce.
-static NONCE_START_KEY: OnceLock<[u8; TOKEN_SECRET_BYTES]> = OnceLock::new();
+static NONCE_START_KEY: OnceLock<[u8; NONCE_KEY_BYTES]> = OnceLock::new();
 
 /// 初始化 Digest nonce key；操作系统熵失败时返回错误而不 panic，并发首调虽可生成候选但 `OnceLock` 只发布一个。
 /// Initialize the nonce key fallibly; concurrent first callers may generate candidates but `OnceLock` publishes exactly one.
-fn nonce_start_key() -> Result<&'static [u8; TOKEN_SECRET_BYTES]> {
+fn nonce_start_key() -> Result<&'static [u8; NONCE_KEY_BYTES]> {
     if let Some(key) = NONCE_START_KEY.get() {
         return Ok(key);
     }
-    let candidate = random_bytes::<TOKEN_SECRET_BYTES>()?;
+    let candidate = random_bytes::<NONCE_KEY_BYTES>()?;
     Ok(NONCE_START_KEY.get_or_init(|| candidate))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AuthSource {
-    Password,
-    Digest,
-    Token,
-    Anonymous,
+type HmacSha256 = Hmac<Sha256>;
+
+/// 构造 HMAC-SHA256 实例，用于 Digest nonce 完整性签名。
+/// Build an HMAC-SHA256 instance used to sign Digest nonce integrity tags.
+pub(super) fn token_mac(secret: &[u8]) -> HmacSha256 {
+    HmacSha256::new_from_slice(secret).expect("HMAC accepts keys of any length")
+}
+
+/// 从操作系统 CSPRNG 读取 N 字节；熵源失败沿 `Result` 返回而不 panic。
+/// Read N bytes from the OS CSPRNG; entropy failure propagates via `Result` rather than panicking.
+pub(super) fn random_bytes<const N: usize>() -> Result<[u8; N]> {
+    let mut output = [0u8; N];
+    getrandom::fill(&mut output).map_err(|err| anyhow!("OS random generator failed: {err}"))?;
+    Ok(output)
 }
 
 pub(crate) enum AuthDecision {
     Allowed {
         user: Option<String>,
         access_paths: AccessPaths,
-        source: AuthSource,
     },
     Forbidden {
         user: String,
-        source: AuthSource,
     },
     Unauthorized,
     RateLimited {
@@ -308,7 +270,6 @@ pub struct AccessControl {
     /// Server/request 副本都有独立计数，重放保护就可被轮换副本绕过。
     /// Clones share one process replay cache; per-request copies would let rotation bypass protection.
     digest_replay: Arc<Mutex<DigestReplayCache>>,
-    token_state: Option<Arc<TokenState>>,
     auth_rate: Arc<Mutex<AuthRateLimiter>>,
     password_hash_admission: Arc<PasswordHashAdmission>,
 }
@@ -325,13 +286,6 @@ impl fmt::Debug for AccessControl {
             .field("use_hashed_password", &self.use_hashed_password)
             .field("configured_user_count", &self.users.len())
             .field("argon2id_profile", &self.argon2id_profile)
-            .field(
-                "persistent_revocation",
-                &self
-                    .token_state
-                    .as_ref()
-                    .is_some_and(|state| state.revocation_backend.is_some()),
-            )
             .finish_non_exhaustive()
     }
 }
@@ -355,26 +309,13 @@ enum AuthProof {
 
 enum AuthCheckOutcome {
     /// proof 与两层限流结论都已提交。 / Both the proof and the two-layer rate verdict are committed.
-    Authenticated(AuthSource),
+    Authenticated,
     /// 凭据已实际求值，两层暂定尝试已提交为失败。 / Credential evaluated and both provisional reservations committed as failure.
     PasswordRejected,
     /// 准入失败绝不计作错误密码。 / Admission failures never count as incorrect passwords.
     AdmissionRejected(PasswordHashAdmissionOutcome),
     /// 速率预留发现既有退避窗口。 / The rate reservation found an existing backoff window.
     RateLimited { retry_after_secs: u64 },
-}
-
-enum TokenRevocationOutcome {
-    Accepted,
-    Revoked,
-    RateLimited { retry_after_secs: u64 },
-    AdmissionRejected(PasswordHashAdmissionOutcome),
-    Infrastructure(anyhow::Error),
-}
-
-enum ExpensiveAuthAdmissionFailure {
-    RateLimited { retry_after_secs: u64 },
-    AdmissionRejected(PasswordHashAdmissionOutcome),
 }
 
 struct CredentialCheck<'a> {
@@ -410,14 +351,11 @@ pub(crate) struct AuthRequest<'a> {
     pub(crate) path: &'a str,
     /// Basic/Digest 验签的真实 HTTP 方法。 / Actual HTTP method used for Basic/Digest proof verification.
     pub(crate) method: &'a Method,
-    /// ACL 资源操作（POST tokengen 按 GET）。 / Resource operation for ACL; POST tokengen is treated as GET.
+    /// ACL 资源操作。 / Resource operation for ACL checks.
     pub(crate) authorization_method: &'a Method,
     pub(crate) authorization: Option<&'a HeaderValue>,
     pub(crate) request_target: &'a str,
     pub(crate) source: Option<SourceIdentity>,
-    /// Token 凭据不能认证 token 签发/撤销，否则 bearer 可无限自续期。
-    /// Bearer credentials cannot authorize issuance/revocation, preventing indefinite self-renewal.
-    pub(crate) allow_token_auth: bool,
 }
 
 impl Default for AccessControl {
@@ -434,7 +372,6 @@ impl Default for AccessControl {
             argon2id_profile: None,
             users: IndexMap::new(),
             digest_replay: Arc::new(Mutex::new(DigestReplayCache::default())),
-            token_state: None,
             auth_rate: Arc::new(Mutex::new(AuthRateLimiter::default())),
             password_hash_admission: Arc::new(PasswordHashAdmission::default()),
         }
@@ -570,103 +507,9 @@ impl AccessControl {
             argon2id_profile,
             users,
             digest_replay: Arc::new(Mutex::new(DigestReplayCache::default())),
-            token_state: Some(Arc::new(TokenState::new(
-                None,
-                None,
-                DEFAULT_TOKEN_TTL_SECS,
-                None,
-            )?)),
             auth_rate: Arc::new(Mutex::new(AuthRateLimiter::default())),
             password_hash_admission: Arc::new(PasswordHashAdmission::default()),
         })
-    }
-
-    pub fn configure_security(
-        &mut self,
-        token_secret: Option<&[u8]>,
-        token_audience: Option<&str>,
-        token_ttl_secs: u64,
-        token_revocation_capabilities: Option<TokenRevocationCapabilities>,
-    ) -> Result<()> {
-        self.token_state = Some(Arc::new(TokenState::new_with_capabilities(
-            token_secret,
-            token_audience,
-            token_ttl_secs,
-            token_revocation_capabilities,
-        )?));
-        Ok(())
-    }
-
-    /// 校验运维 token 设置而不生成运行 secret 或打开/创建撤销后端，是 `--check-config` 的无副作用半边。
-    /// Validate token settings without generating secrets or touching persistence; used by `ram --check-config`.
-    pub(crate) fn validate_security_configuration(
-        &self,
-        token_secret: Option<&[u8]>,
-        token_audience: Option<&str>,
-        token_ttl_secs: u64,
-        revocation_capabilities: Option<&TokenRevocationCapabilities>,
-    ) -> Result<()> {
-        let _ = validated_token_secret(token_secret)?;
-        let _ = validated_token_audience(token_audience)?;
-        validate_token_ttl(token_ttl_secs)?;
-        if let Some(capabilities) = revocation_capabilities {
-            if let Some(state) = capabilities.state.existing() {
-                let file = state.open_regular_file_pinned()?;
-                let metadata = file.metadata()?;
-                validate_revocation_file_metadata(&metadata, true)
-                    .context("token revocation state failed trusted-file validation")?;
-                parse_revocation_file(file, revocation_fingerprint(&metadata))
-                    .context("failed to validate existing token revocation state")?;
-            }
-            if let Some(lock) = capabilities.lock.existing() {
-                let metadata = lock.open_metadata_pinned()?.metadata()?;
-                validate_revocation_file_metadata(&metadata, false)
-                    .context("token revocation transaction lock failed trusted-file validation")?;
-                let file = lock.open_regular_file_pinned_read_write()?;
-                validate_revocation_file_metadata(&file.metadata()?, false).context(
-                    "token revocation transaction lock failed read-write capability validation",
-                )?;
-            }
-        }
-        Ok(())
-    }
-
-    pub(crate) fn verify_token_revocation_capabilities(
-        &self,
-        expected: Option<&TokenRevocationCapabilities>,
-    ) -> Result<()> {
-        self.token_state
-            .as_ref()
-            .ok_or_else(|| anyhow!("token security state is not configured"))?
-            .verify_revocation_backend_binding(expected)
-    }
-
-    /// 刷新原固定父目录下两个名称，证明锁仍是后端持有 inode，并加载状态名最新有效单调 generation；状态可替换是原子 rename 的设计。
-    /// Refresh both names below the pinned parent, verify the lock inode, and load the latest monotonic state generation; state replacement is intentional.
-    pub(crate) fn finalize_token_revocation_capabilities(
-        &self,
-        initial: Option<&TokenRevocationCapabilities>,
-    ) -> Result<Option<TokenRevocationCapabilities>> {
-        let current = initial
-            .map(TokenRevocationCapabilities::with_current_expectations)
-            .transpose()?;
-        self.verify_token_revocation_capabilities(current.as_ref())?;
-        Ok(current)
-    }
-
-    #[cfg(test)]
-    fn configure_security_with_revocation_path(
-        &mut self,
-        token_secret: Option<&[u8]>,
-        token_audience: Option<&str>,
-        token_ttl_secs: u64,
-        token_revocation_file: Option<PathBuf>,
-    ) -> Result<()> {
-        let capabilities = token_revocation_file
-            .as_deref()
-            .map(TokenRevocationCapabilities::capture)
-            .transpose()?;
-        self.configure_security(token_secret, token_audience, token_ttl_secs, capabilities)
     }
 
     pub fn has_users(&self) -> bool {
@@ -674,29 +517,11 @@ impl AccessControl {
     }
 
     /// 所有昂贵认证槽占用时仍为普通文件系统工作保留一个 worker 的最小 Tokio blocking pool；
-    /// 密码哈希或持久 token 撤销后端都会使用这些槽。
+    /// 密码哈希会使用这些槽。
     /// Minimum blocking-pool size leaving one filesystem worker when every expensive-auth slot is
-    /// occupied; password hashes and persistent token revocation both use those slots.
-    #[cfg(test)]
+    /// occupied; password hashing uses those slots.
     pub(crate) fn minimum_blocking_threads(&self) -> u64 {
-        self.minimum_blocking_threads_with_persistent_revocation(false)
-    }
-
-    /// 配置检查模式不打开/创建持久后端，因此调用方把已解析的 effective 持久撤销拓扑作为
-    /// hint 传入；正常运行则同时检查实际绑定后端，避免解析顺序让资源下限看见过时状态。
-    /// Check-config deliberately does not open/create the durable backend, so callers provide the
-    /// parsed effective topology as a hint. Run mode also inspects the bound backend, preventing
-    /// validation order from observing stale security state.
-    pub(crate) fn minimum_blocking_threads_with_persistent_revocation(
-        &self,
-        persistent_revocation_hint: bool,
-    ) -> u64 {
-        let persistent_revocation = persistent_revocation_hint
-            || self
-                .token_state
-                .as_ref()
-                .is_some_and(|state| state.revocation_backend.is_some());
-        if self.use_hashed_password || persistent_revocation {
+        if self.use_hashed_password {
             PASSWORD_VERIFY_CONCURRENCY as u64 + 1
         } else {
             1
@@ -720,13 +545,12 @@ impl AccessControl {
             authorization,
             request_target,
             source,
-            allow_token_auth,
         } = request;
         if self.empty {
             return AuthDecision::Unauthorized;
         }
 
-        // 中文：无凭据 OPTIONS 保持廉价匿名发现；DAV 客户端显式带凭据时必须验证并按真实 ACL
+        // 中文：无凭据 OPTIONS 保持廉价匿名发现；客户端显式带凭据时必须验证并按真实 ACL
         // 收窄 Allow，错误凭据不能静默继承匿名视图而谎报能力。
         // English: Credential-free OPTIONS is cheap discovery. Supplied
         // credentials must verify so Allow reflects the principal; invalid credentials cannot inherit anonymous capabilities.
@@ -734,24 +558,10 @@ impl AccessControl {
             return AuthDecision::Allowed {
                 user: None,
                 access_paths: AccessPaths::new(AccessPerm::ReadOnly),
-                source: AuthSource::Anonymous,
             };
         }
 
-        // 中文：Bearer 分享 token 只接受 Authorization 头，不读 URL 查询串。
-        // English: Bearer share tokens are accepted only in Authorization, never the URL query.
         if let Some(authorization) = authorization {
-            if let Some(token) = strip_prefix(authorization.as_bytes(), b"Bearer ")
-                .and_then(|value| std::str::from_utf8(value).ok())
-            {
-                if !allow_token_auth {
-                    return AuthDecision::Unauthorized;
-                }
-                return self
-                    .guard_token(token, path, method, authorization_method, source)
-                    .await;
-            }
-
             let user = get_auth_user(authorization).unwrap_or_else(|| "<invalid>".to_string());
             let configured_user = self.users.get(&user);
             // 中文：每次 Basic/Digest 校验都在 `check_auth` 内先原子预留两层状态：
@@ -777,17 +587,13 @@ impl AccessControl {
                     })
                     .await
                 {
-                    AuthCheckOutcome::Authenticated(auth_source) => {
+                    AuthCheckOutcome::Authenticated => {
                         return match ap.guard(path, authorization_method) {
                             Some(access_paths) => AuthDecision::Allowed {
                                 user: Some(user),
                                 access_paths,
-                                source: auth_source,
                             },
-                            None => AuthDecision::Forbidden {
-                                user,
-                                source: auth_source,
-                            },
+                            None => AuthDecision::Forbidden { user },
                         };
                     }
                     AuthCheckOutcome::PasswordRejected => return AuthDecision::Unauthorized,
@@ -842,7 +648,7 @@ impl AccessControl {
                     AuthCheckOutcome::RateLimited { retry_after_secs } => {
                         return AuthDecision::RateLimited { retry_after_secs };
                     }
-                    AuthCheckOutcome::Authenticated(_) => {
+                    AuthCheckOutcome::Authenticated => {
                         // 中文：`accept_password=false` 是结构性不变量；若未来改动破坏它，
                         // 仍必须 fail closed，不能把 dummy proof 变成身份。
                         // English: `accept_password=false` is structural. If a future change breaks
@@ -856,190 +662,6 @@ impl AccessControl {
         }
 
         AuthDecision::Unauthorized
-    }
-
-    async fn guard_token(
-        &self,
-        token: &str,
-        path: &str,
-        method: &Method,
-        authorization_method: &Method,
-        source: Option<SourceIdentity>,
-    ) -> AuthDecision {
-        if matches!(*method, Method::GET | Method::HEAD) {
-            let state = match self.token_state.clone() {
-                Some(state) => state,
-                None => {
-                    return AuthDecision::ServiceUnavailable {
-                        retry_after_secs: PASSWORD_VERIFY_RETRY_AFTER_SECS,
-                    };
-                }
-            };
-            let now_secs = match unix_now() {
-                Ok(now) => now.as_secs(),
-                Err(err) => {
-                    warn!("Bearer verification clock unavailable: {err:#}");
-                    return AuthDecision::ServiceUnavailable {
-                        retry_after_secs: PASSWORD_VERIFY_RETRY_AFTER_SECS,
-                    };
-                }
-            };
-
-            // 中文：先在 Tokio worker 上完成有 8 KiB 上限的格式、base64、HMAC 与 JSON
-            // 校验。只有 MAC 通过且 `sub` 可用后，才允许该主体选择长期限流状态；坏 MAC
-            // 永远不会进入持久撤销阻塞队列。
-            // English: Perform the 8-KiB-bounded envelope, base64, HMAC, and JSON checks on the
-            // Tokio worker first. Only a MAC-authenticated usable `sub` may select retained subject
-            // state, and a bad MAC can never reach the persistent revocation blocking queue.
-            let claims = match state.decode_signed_claims(token) {
-                Ok(claims) if !claims.sub.is_empty() => claims,
-                Ok(_) | Err(_) => return self.invalid_bearer_failure(source),
-            };
-            let user = claims.sub.clone();
-            let subject_rate_key =
-                AuthRateKey::namespaced(source, BEARER_SUBJECT_RATE_DOMAIN, &user);
-
-            // 中文：audience、过期、路径和账号存在性失败仍有可信主体，应计入该主体桶；
-            // 它们不能污染来源共享的“未验签”桶。
-            // English: Audience, expiry, path, and account-existence failures still have an
-            // authenticated subject and therefore charge that subject, not the shared unsigned bucket.
-            if state.validate_claims(&claims, now_secs).is_err()
-                || claims.path != path
-                || !self.users.contains_key(&user)
-            {
-                return self.auth_failed_with_precheck(subject_rate_key);
-            }
-
-            let revocation_outcome = if state.revocation_backend.is_some() {
-                self.verify_persistent_token_revocation(
-                    state,
-                    &claims,
-                    subject_rate_key.clone(),
-                    source,
-                    &user,
-                    now_secs,
-                )
-                .await
-            } else {
-                // 中文：内存后端没有阻塞 I/O，但仍在查询前应用主体退避。
-                // English: The in-memory backend has no blocking I/O, but still applies subject
-                // backoff before its lookup.
-                if let Some(decision) = self.rate_precheck(&subject_rate_key) {
-                    return decision;
-                }
-                match state.is_revoked(&claims.jti, now_secs) {
-                    Ok(true) => {
-                        return self.auth_failed(subject_rate_key);
-                    }
-                    Ok(false) => TokenRevocationOutcome::Accepted,
-                    Err(err) => TokenRevocationOutcome::Infrastructure(err),
-                }
-            };
-            match revocation_outcome {
-                TokenRevocationOutcome::Accepted => {}
-                TokenRevocationOutcome::Revoked => return AuthDecision::Unauthorized,
-                TokenRevocationOutcome::RateLimited { retry_after_secs } => {
-                    return AuthDecision::RateLimited { retry_after_secs };
-                }
-                TokenRevocationOutcome::AdmissionRejected(outcome) => {
-                    return outcome.into_decision();
-                }
-                TokenRevocationOutcome::Infrastructure(err) => {
-                    warn!("Bearer verification infrastructure unavailable: {err:#}");
-                    // 中文：服务端锁/I/O/缓存失败不是错误凭据，不能修改认证失败状态。
-                    // English: A server lock/I/O/cache failure is not a bad credential and must not change failure state.
-                    return AuthDecision::ServiceUnavailable {
-                        retry_after_secs: PASSWORD_VERIFY_RETRY_AFTER_SECS,
-                    };
-                }
-            }
-
-            if !self.auth_succeeded(&subject_rate_key) {
-                return AuthDecision::ServiceUnavailable {
-                    retry_after_secs: PASSWORD_VERIFY_RETRY_AFTER_SECS,
-                };
-            }
-            let (_, ap) = self
-                .users
-                .get(&user)
-                .expect("the token user was checked before revocation I/O");
-            return match ap.guard(path, authorization_method) {
-                Some(access_paths) => AuthDecision::Allowed {
-                    user: Some(user),
-                    access_paths,
-                    source: AuthSource::Token,
-                },
-                None => AuthDecision::Forbidden {
-                    user,
-                    source: AuthSource::Token,
-                },
-            };
-        }
-        // 中文：签名验证前 payload 完全由攻击者控制，尤其不能把未验签 `sub` 作为保留状态键。
-        // 所有畸形/无效 Bearer 按已验证传输来源共享固定桶；验证成功的 token 已在上方只使用
-        // 真实主体桶，因此同源伪 token 的退避不会锁死合法 token。
-        // English: The payload is attacker-controlled until its MAC verifies, so an unverified `sub`
-        // must never select retained state. Malformed/invalid bearer attempts share one fixed key per
-        // verified source; a verified token returns above using only its real subject bucket, so invalid
-        // traffic from the same source cannot lock out a valid signed token.
-        self.invalid_bearer_failure(source)
-    }
-
-    fn invalid_bearer_failure(&self, source: Option<SourceIdentity>) -> AuthDecision {
-        self.auth_failed_with_precheck(AuthRateKey::namespaced(
-            source,
-            BEARER_INVALID_RATE_DOMAIN,
-            "",
-        ))
-    }
-
-    fn auth_failed_with_precheck(&self, key: AuthRateKey) -> AuthDecision {
-        if let Some(decision) = self.rate_precheck(&key) {
-            return decision;
-        }
-        self.auth_failed(key)
-    }
-
-    fn rate_precheck(&self, key: &AuthRateKey) -> Option<AuthDecision> {
-        match self.rate_retry_after(key) {
-            Ok(Some(retry_after_secs)) => Some(AuthDecision::RateLimited { retry_after_secs }),
-            Ok(None) => None,
-            Err(_) => Some(AuthDecision::ServiceUnavailable {
-                retry_after_secs: PASSWORD_VERIFY_RETRY_AFTER_SECS,
-            }),
-        }
-    }
-
-    fn rate_retry_after(&self, key: &AuthRateKey) -> Result<Option<u64>, AuthRateStateError> {
-        self.auth_rate
-            .lock()
-            .map_err(|_| AuthRateStateError::Unavailable)
-            .map(|mut limiter| limiter.retry_after(key, Instant::now()))
-    }
-
-    fn auth_failed(&self, key: AuthRateKey) -> AuthDecision {
-        match self.auth_rate.lock() {
-            Ok(mut limiter) => match limiter.failed(key, Instant::now()) {
-                Ok(Some(retry_after_secs)) => AuthDecision::RateLimited { retry_after_secs },
-                Ok(None) => AuthDecision::Unauthorized,
-                Err(AuthRateStateError::Capacity | AuthRateStateError::Unavailable) => {
-                    AuthDecision::ServiceUnavailable {
-                        retry_after_secs: PASSWORD_VERIFY_RETRY_AFTER_SECS,
-                    }
-                }
-            },
-            Err(_) => AuthDecision::ServiceUnavailable {
-                retry_after_secs: PASSWORD_VERIFY_RETRY_AFTER_SECS,
-            },
-        }
-    }
-
-    fn auth_succeeded(&self, key: &AuthRateKey) -> bool {
-        let Ok(mut limiter) = self.auth_rate.lock() else {
-            return false;
-        };
-        limiter.succeeded(key);
-        true
     }
 
     /// 中文：测试用确定性工作计划；统一 profile 后 known/unknown 都恰好执行一个同成本哈希。
@@ -1113,10 +735,10 @@ impl AccessControl {
         };
         if strip_prefix(authorization.as_bytes(), b"Basic ").is_some() {
             let Some((user, password)) = decode_basic_credentials(authorization) else {
-                return self.finish_password_check(reservation, None);
+                return self.finish_password_check(reservation, false);
             };
             if user != auth_user {
-                return self.finish_password_check(reservation, None);
+                return self.finish_password_check(reservation, false);
             }
 
             if self.use_hashed_password {
@@ -1168,15 +790,15 @@ impl AccessControl {
             // this defensive branch so a future caller cannot treat PHC/crypt text as plaintext by
             // bypassing that invariant.
             if is_supported_password_hash(auth_pass) {
-                return self.finish_password_check(reservation, None);
+                return self.finish_password_check(reservation, false);
             }
 
             let proof_matches =
                 self.compare_plaintext_password(password.as_bytes(), auth_pass.as_bytes());
             return if proof_matches && accept_password {
-                self.finish_password_check(reservation, Some(AuthSource::Password))
+                self.finish_password_check(reservation, true)
             } else {
-                self.finish_password_check(reservation, None)
+                self.finish_password_check(reservation, false)
             };
         }
 
@@ -1185,18 +807,18 @@ impl AccessControl {
         // English: When the instance uses password hashes, Digest is uniformly disabled for every
         // claimed username; known hashes must not return early while unknown dummies do full work.
         if self.use_hashed_password {
-            return self.finish_password_check(reservation, None);
+            return self.finish_password_check(reservation, false);
         }
 
         match check_auth(authorization, method, request_target, auth_user, auth_pass) {
             Some(proof) if accept_password => {
                 if self.accept_auth_proof(proof, source) {
-                    self.finish_password_check(reservation, Some(AuthSource::Digest))
+                    self.finish_password_check(reservation, true)
                 } else {
-                    self.finish_password_check(reservation, None)
+                    self.finish_password_check(reservation, false)
                 }
             }
-            Some(_) | None => self.finish_password_check(reservation, None),
+            Some(_) | None => self.finish_password_check(reservation, false),
         }
     }
 
@@ -1231,16 +853,17 @@ impl AccessControl {
     fn finish_password_check(
         &self,
         reservation: PasswordRateReservation,
-        authenticated_source: Option<AuthSource>,
+        authenticated: bool,
     ) -> AuthCheckOutcome {
-        if !reservation.finish(authenticated_source.is_some()) {
+        if !reservation.finish(authenticated) {
             let outcome = PasswordHashAdmissionOutcome::RateStateUnavailable;
             self.password_hash_admission.reject_without_guard(outcome);
             return AuthCheckOutcome::AdmissionRejected(outcome);
         }
-        match authenticated_source {
-            Some(source) => AuthCheckOutcome::Authenticated(source),
-            None => AuthCheckOutcome::PasswordRejected,
+        if authenticated {
+            AuthCheckOutcome::Authenticated
+        } else {
+            AuthCheckOutcome::PasswordRejected
         }
     }
 
@@ -1372,7 +995,7 @@ impl AccessControl {
             );
         }
         if accepted {
-            AuthCheckOutcome::Authenticated(AuthSource::Password)
+            AuthCheckOutcome::Authenticated
         } else {
             AuthCheckOutcome::PasswordRejected
         }
@@ -1408,298 +1031,27 @@ impl AccessControl {
         }
     }
 
-    /// 为**已认证**的 `user` 授权 COPY/MOVE 的 `Destination` 目标路径。
+    /// 为**已认证**的 `user` 授权 MOVE 的 `Destination` 目标路径。
     ///
     /// 有意跳过密码/Digest 验证：请求携带的那一个 Authorization 头已经
     /// 针对真实请求目标（源路径）验证过一次，若对目标路径重跑 Digest
     /// 校验，要么必然失败、要么得要求客户端为一个它从未请求过的 URI
-    /// 签名。目标路径一律要求**读写**权限——不管 COPY/MOVE 对源路径
-    /// 只需要什么权限，对目标都是在写入。
-    /// Authorize COPY/MOVE Destination for an already authenticated user. Do
+    /// 签名。目标路径一律要求**读写**权限。
+    /// Authorize a MOVE Destination for an already authenticated user. Do
     /// not rerun Digest against an unrequested URI; always require ReadWrite on the destination.
     pub fn guard_dest_for_user(&self, user: &str, path: &str) -> Option<AccessPaths> {
         let (_, ap) = self.users.get(user)?;
         ap.guard_write(path)
     }
 
-    /// 主体是否至少有一个可能写目标；OPTIONS 仅用来避免向匿名/全局只读主体声明 COPY，实际请求仍逐目标检查。
-    /// Whether the principal has any possible write destination; OPTIONS uses this only for advertisement, while each COPY checks its concrete target.
+    /// 主体是否至少有一个可能写目标；OPTIONS 用它决定是否声明创建/移动能力，
+    /// 实际请求仍逐目标检查。
+    /// Whether the principal has any possible write destination. OPTIONS uses this for
+    /// create/move advertisement while each request still checks its concrete target.
     pub(crate) fn user_has_write_access(&self, user: &str) -> bool {
         self.users
             .get(user)
             .is_some_and(|(_, paths)| paths.has_write_access())
-    }
-
-    /// 签发绑定 audience、路径、短期过期与唯一 jti 的 Bearer token。 / Issue a bearer token bound to audience, path, short expiry, and unique jti.
-    pub fn generate_token(&self, path: &str, user: &str) -> Result<String> {
-        self.users
-            .get(user)
-            .ok_or_else(|| anyhow!("Not found user '{user}'"))?;
-        let state = self
-            .token_state
-            .as_deref()
-            .ok_or_else(|| anyhow!("token subsystem is not configured"))?;
-        let iat = unix_now()?.as_secs();
-        let exp = iat
-            .checked_add(state.ttl_secs)
-            .ok_or_else(|| anyhow!("Token expiration timestamp overflow"))?;
-        state.sign(&TokenClaims {
-            v: TOKEN_VERSION,
-            sub: user.to_string(),
-            path: path.to_string(),
-            aud: state.audience.clone(),
-            iat,
-            exp,
-            jti: hex::encode(random_bytes::<16>()?),
-        })
-    }
-
-    async fn acquire_expensive_auth_worker_lease(
-        &self,
-        rate_key: AuthRateKey,
-        source: Option<SourceIdentity>,
-        admission_domain: &[u8],
-        admission_subject: &str,
-    ) -> std::result::Result<PasswordHashWorkerLease, ExpensiveAuthAdmissionFailure> {
-        // 中文：暂定认证预留与同主体并发请求原子竞争；它在昂贵 worker 返回前阻止并发突发
-        // 共同看到旧状态。验证 worker 提交 valid/revoked，撤销写 worker 成功时提交 valid；
-        // 基础设施失败均由 Drop 取消而不伪造凭据失败。
-        // English: A provisional authentication reservation races atomically with same-subject peers,
-        // preventing a burst from sharing stale state before expensive workers return. Verification
-        // commits valid/revoked, successful mutation commits valid, and infrastructure failure Drop
-        // cancels without inventing a credential failure.
-        let reservation = match HashAttemptReservation::reserve(self.auth_rate.clone(), rate_key) {
-            Ok(reservation) => reservation,
-            Err(HashAttemptReservationReject::Blocked { retry_after_secs }) => {
-                return Err(ExpensiveAuthAdmissionFailure::RateLimited { retry_after_secs });
-            }
-            Err(HashAttemptReservationReject::ConcurrentAttemptLimit) => {
-                let outcome = PasswordHashAdmissionOutcome::ConcurrentAttemptLimit;
-                self.password_hash_admission.reject_without_guard(outcome);
-                return Err(ExpensiveAuthAdmissionFailure::AdmissionRejected(outcome));
-            }
-            Err(HashAttemptReservationReject::StateCapacity) => {
-                let outcome = PasswordHashAdmissionOutcome::RateStateCapacity;
-                self.password_hash_admission.reject_without_guard(outcome);
-                return Err(ExpensiveAuthAdmissionFailure::AdmissionRejected(outcome));
-            }
-            Err(HashAttemptReservationReject::StateUnavailable) => {
-                let outcome = PasswordHashAdmissionOutcome::RateStateUnavailable;
-                self.password_hash_admission.reject_without_guard(outcome);
-                return Err(ExpensiveAuthAdmissionFailure::AdmissionRejected(outcome));
-            }
-        };
-
-        // 中文：复用昂贵认证的全局、来源、主体与排队上限；持久撤销 I/O 和密码哈希共享
-        // 同一个阻塞工作预算，不能分别把 Tokio 阻塞池压满。
-        // English: Reuse global, source, subject, and queue bounds for expensive authentication.
-        // Persistent revocation I/O and password hashing share one blocking-work budget instead of
-        // independently saturating Tokio's blocking pool.
-        let admission_guard = match self.password_hash_admission.try_reserve_namespaced(
-            source,
-            admission_domain,
-            admission_subject,
-        ) {
-            Ok(guard) => guard,
-            Err(outcome) => {
-                return Err(ExpensiveAuthAdmissionFailure::AdmissionRejected(outcome));
-            }
-        };
-        let permit = match tokio::time::timeout(
-            self.password_hash_admission.queue_timeout,
-            self.password_hash_admission
-                .verify_limit
-                .clone()
-                .acquire_owned(),
-        )
-        .await
-        {
-            Ok(Ok(permit)) => permit,
-            Ok(Err(_)) => {
-                let outcome = PasswordHashAdmissionOutcome::QueueClosed;
-                admission_guard.reject(outcome);
-                return Err(ExpensiveAuthAdmissionFailure::AdmissionRejected(outcome));
-            }
-            Err(_) => {
-                let outcome = PasswordHashAdmissionOutcome::QueueTimeout;
-                admission_guard.reject(outcome);
-                return Err(ExpensiveAuthAdmissionFailure::AdmissionRejected(outcome));
-            }
-        };
-        match reservation.blocked_after_global_permit() {
-            Ok(Some(retry_after_secs)) => {
-                let outcome =
-                    PasswordHashAdmissionOutcome::BlockedAfterGlobalPermit { retry_after_secs };
-                admission_guard.reject(outcome);
-                drop(permit);
-                return Err(ExpensiveAuthAdmissionFailure::AdmissionRejected(outcome));
-            }
-            Ok(None) => {}
-            Err(_) => {
-                let outcome = PasswordHashAdmissionOutcome::RateStateUnavailable;
-                admission_guard.reject(outcome);
-                drop(permit);
-                return Err(ExpensiveAuthAdmissionFailure::AdmissionRejected(outcome));
-            }
-        }
-
-        match PasswordHashWorkerLease::start(permit, admission_guard, reservation) {
-            Ok((worker_lease, _snapshot)) => Ok(worker_lease),
-            Err(outcome) => {
-                self.password_hash_admission.reject_without_guard(outcome);
-                Err(ExpensiveAuthAdmissionFailure::AdmissionRejected(outcome))
-            }
-        }
-    }
-
-    async fn verify_persistent_token_revocation(
-        &self,
-        state: Arc<TokenState>,
-        claims: &TokenClaims,
-        rate_key: AuthRateKey,
-        source: Option<SourceIdentity>,
-        admission_subject: &str,
-        now_secs: u64,
-    ) -> TokenRevocationOutcome {
-        let worker_lease = match self
-            .acquire_expensive_auth_worker_lease(
-                rate_key,
-                source,
-                BEARER_REVOCATION_ADMISSION_DOMAIN,
-                admission_subject,
-            )
-            .await
-        {
-            Ok(lease) => lease,
-            Err(ExpensiveAuthAdmissionFailure::RateLimited { retry_after_secs }) => {
-                return TokenRevocationOutcome::RateLimited { retry_after_secs };
-            }
-            Err(ExpensiveAuthAdmissionFailure::AdmissionRejected(outcome)) => {
-                return TokenRevocationOutcome::AdmissionRejected(outcome);
-            }
-        };
-        let jti = claims.jti.clone();
-        #[cfg(test)]
-        state
-            .revocation_workers_started
-            .fetch_add(1, Ordering::Relaxed);
-        let worker = tokio::task::spawn_blocking(move || match state.is_revoked(&jti, now_secs) {
-            Ok(revoked) => {
-                // 中文：真实 worker 在仍持有全部 admission/permit 时提交结果；valid 清除主体
-                // 失败，revoked 提交一次失败。I/O 错误则由 Drop 仅取消暂定预留。
-                // English: The real worker commits while owning every admission resource: valid
-                // clears subject failures, revoked commits one failure, and I/O error Drop merely
-                // cancels the provisional reservation.
-                let committed = worker_lease.finish(!revoked);
-                Ok((revoked, committed))
-            }
-            Err(err) => Err(err),
-        })
-        .await;
-        let (revoked, committed) = match worker {
-            Ok(Ok(result)) => result,
-            Ok(Err(err)) => return TokenRevocationOutcome::Infrastructure(err),
-            Err(err) => {
-                let outcome = PasswordHashAdmissionOutcome::WorkerFailed;
-                self.password_hash_admission.reject_without_guard(outcome);
-                return TokenRevocationOutcome::Infrastructure(anyhow!(
-                    "token revocation worker failed: {err}"
-                ));
-            }
-        };
-        if !committed {
-            let outcome = PasswordHashAdmissionOutcome::RateStateUnavailable;
-            self.password_hash_admission.reject_without_guard(outcome);
-            return TokenRevocationOutcome::AdmissionRejected(outcome);
-        }
-        if revoked {
-            TokenRevocationOutcome::Revoked
-        } else {
-            TokenRevocationOutcome::Accepted
-        }
-    }
-
-    pub async fn revoke_token(
-        &self,
-        token: &str,
-        user: &str,
-        path: &str,
-        source: Option<SourceIdentity>,
-    ) -> std::result::Result<(), TokenRevokeError> {
-        let state = self.token_state.clone().ok_or_else(|| {
-            TokenRevokeError::Infrastructure(anyhow!("token subsystem is not configured"))
-        })?;
-        let now = unix_now()
-            .map_err(TokenRevokeError::Infrastructure)?
-            .as_secs();
-        let claims = state.verify(token, now, false).map_err(|err| match err {
-            TokenVerifyFailure::Invalid(err) => TokenRevokeError::Invalid(err),
-            TokenVerifyFailure::Infrastructure(err) => TokenRevokeError::Infrastructure(err),
-        })?;
-        if claims.sub != user || claims.path != path {
-            return Err(TokenRevokeError::Invalid(anyhow!(
-                "token does not belong to this principal and resource"
-            )));
-        }
-        if state.revocation_backend.is_none() {
-            return state
-                .revoke(claims.jti, claims.exp, now)
-                .map_err(TokenRevokeError::Infrastructure);
-        }
-
-        let worker_lease = self
-            .acquire_expensive_auth_worker_lease(
-                AuthRateKey::namespaced(source, TOKEN_REVOKE_RATE_DOMAIN, user),
-                source,
-                TOKEN_REVOKE_ADMISSION_DOMAIN,
-                user,
-            )
-            .await
-            .map_err(|failure| match failure {
-                ExpensiveAuthAdmissionFailure::RateLimited { retry_after_secs } => {
-                    TokenRevokeError::RateLimited { retry_after_secs }
-                }
-                ExpensiveAuthAdmissionFailure::AdmissionRejected(outcome) => {
-                    match outcome.into_decision() {
-                        AuthDecision::RateLimited { retry_after_secs } => {
-                            TokenRevokeError::RateLimited { retry_after_secs }
-                        }
-                        AuthDecision::ServiceUnavailable { .. } => {
-                            TokenRevokeError::Infrastructure(anyhow!(
-                                "token revocation admission rejected: {outcome:?}"
-                            ))
-                        }
-                        _ => unreachable!("admission outcomes only map to 429 or 503"),
-                    }
-                }
-            })?;
-        #[cfg(test)]
-        state
-            .revocation_mutation_workers_started
-            .fetch_add(1, Ordering::Relaxed);
-        let worker =
-            tokio::task::spawn_blocking(move || match state.revoke(claims.jti, claims.exp, now) {
-                Ok(()) => {
-                    if worker_lease.finish(true) {
-                        Ok(())
-                    } else {
-                        Err(anyhow!("authentication rate state became unavailable"))
-                    }
-                }
-                Err(err) => Err(err),
-            })
-            .await;
-        match worker {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(err)) => Err(TokenRevokeError::Infrastructure(err)),
-            Err(err) => {
-                self.password_hash_admission
-                    .reject_without_guard(PasswordHashAdmissionOutcome::WorkerFailed);
-                Err(TokenRevokeError::Infrastructure(anyhow!(
-                    "token revocation worker failed: {err}"
-                )))
-            }
-        }
     }
 }
 
@@ -1753,9 +1105,9 @@ fn decode_basic_credentials(authorization: &HeaderValue) -> Option<(String, Stri
 }
 
 #[cfg(test)]
-// 物理目录刻意避开 `tests/`，以免命中覆盖率的集成测试排除规则；逻辑模块名仍保持
-// `tests`，从而维持被子进程 `--exact` 调用的测试路径。
-// The physical directory deliberately avoids `tests/`, which the coverage job excludes as an
-// integration-test tree. The logical module remains `tests` to preserve subprocess `--exact` paths.
+// 物理目录刻意避开顶层集成测试目录；逻辑模块名仍保持 `tests`，
+// 从而维持被子进程 `--exact` 调用的测试路径。
+// The physical directory avoids the top-level integration-test tree. The logical module remains
+// `tests` to preserve subprocess `--exact` paths.
 #[path = "test_suite/mod.rs"]
 mod tests;

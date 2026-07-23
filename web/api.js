@@ -27,35 +27,14 @@ export class ApiError extends Error {
 
 export const MAX_API_ERROR_BODY_BYTES = 64 * 1024;
 export const MAX_AUTHENTICATED_USERNAME_BYTES = 256;
-export const MAX_BEARER_TOKEN_BYTES = 8192;
 /** 前端交互等待服务端响应头的最长时间。 / Maximum wait for response headers from an interactive request. */
 export const REQUEST_TOTAL_TIMEOUT_MS = 15 * 60 * 1000;
 /** 有界响应流两个连续 chunk 之间的最长停滞。 / Maximum stall between chunks of a bounded response stream. */
 export const RESPONSE_IDLE_TIMEOUT_MS = 30 * 1000;
-/** 便捷下载、编辑和预览响应的总读取期限。 / Total read deadline for convenience downloads, edits, and previews. */
+/** 有界控制面和预览响应的总读取期限。 / Total read deadline for bounded control-plane and preview responses. */
 export const RESPONSE_TOTAL_TIMEOUT_MS = 15 * 60 * 1000;
 /** 有界响应允许的最大流分块数。 / Maximum stream chunks accepted by one bounded response. */
 export const MAX_BUFFERED_RESPONSE_CHUNKS = 65_536;
-
-/**
- * 严格识别单个 RFC 强 entity-tag。引号内的逗号合法，但多个标签、弱前缀、
- * 空白、控制字符和超出 HTTP header byte 范围的 Unicode 都必须拒绝。
- *
- * Strictly recognize one RFC strong entity-tag. A comma inside the quoted
- * opaque value is legal; lists, weak prefixes, whitespace, controls, and
- * Unicode outside the HTTP header-byte range are rejected.
- *
- * @param {string | null} value
- */
-export function isStrongEntityTag(value) {
-  if (value === null || value.length < 2 || value[0] !== '"' || value.at(-1) !== '"') return false;
-  for (let index = 1; index < value.length - 1; index += 1) {
-    const code = value.charCodeAt(index);
-    if (code === 0x21 || (code >= 0x23 && code <= 0x7e) || (code >= 0x80 && code <= 0xff)) continue;
-    return false;
-  }
-  return true;
-}
 
 /**
  * 将短控制面响应限制在服务器协议允许的字节数内。正文按 UTF-8 解码；大小按原始字节
@@ -267,78 +246,29 @@ export function loadFile(url, init) {
   return request(url, init);
 }
 
-/**
- * 浏览器编辑始终是条件写入。缺少 ETag 不代表允许覆盖；服务器不能提供强校验器时，
- * 调用方必须禁用保存。
- *
- * A browser edit is always conditional. Absence of an ETag is not permission
- * to overwrite: callers must disable saving when the server cannot provide a
- * strong validator.
- *
- * @param {string} url
- * @param {string} etag
- * @param {BodyInit} body
- */
-export function saveFile(url, etag, body) {
-  return requestWithoutResponseBody(url, {
-    method: "PUT",
-    headers: {
-      "Content-Type": "text/plain; charset=utf-8",
-      "If-Match": etag,
-    },
-    body,
-  });
-}
-
-/**
- * 为源资源变更构造且只构造一种并发前置条件。目录列表使用服务端签发的扫描版本，
- * 编辑页使用用户实际读取到的强 ETag；同时发送二者会混淆两种不同快照的含义，
- * 因而在发出请求前失败关闭。
- *
- * Build exactly one concurrency precondition for a source-resource mutation.
- * Directory listings use the server-signed scan version, while editor pages
- * use the strong ETag of the representation the user actually read. Sending
- * both would mix two distinct snapshot models, so fail closed before fetch.
- *
- * @param {string | undefined} mutationVersion
- * @param {string | undefined} sourceEtag
- * @returns {Record<string, string> | undefined}
- */
-function sourceMutationHeaders(mutationVersion, sourceEtag) {
+/** @param {string | undefined} mutationVersion */
+function sourceMutationHeaders(mutationVersion) {
   if (mutationVersion !== undefined && (typeof mutationVersion !== "string" || !mutationVersion)) {
     throw new TypeError("mutationVersion must be a non-empty string when supplied");
   }
-  if (sourceEtag !== undefined && !isStrongEntityTag(sourceEtag)) {
-    throw new TypeError("sourceEtag must be a single strong entity-tag when supplied");
-  }
-  if (mutationVersion !== undefined && sourceEtag !== undefined) {
-    throw new TypeError("mutationVersion and sourceEtag are mutually exclusive");
-  }
   if (mutationVersion !== undefined) return { "X-Ram-If-Mutation-Version": mutationVersion };
-  if (sourceEtag !== undefined) return { "If-Match": sourceEtag };
   return undefined;
 }
 
 /**
  * @param {string} url
  * @param {string} [mutationVersion]
- * @param {string} [sourceEtag]
  */
-export function deleteResource(url, mutationVersion, sourceEtag) {
+export function deleteResource(url, mutationVersion) {
   return requestWithoutResponseBody(url, {
     method: "DELETE",
-    headers: sourceMutationHeaders(mutationVersion, sourceEtag),
+    headers: sourceMutationHeaders(mutationVersion),
   });
 }
 
 /** @param {string} url */
 export function createDirectory(url) {
   return requestWithoutResponseBody(url, { method: "MKCOL" });
-}
-
-/** @param {string} url */
-export function createEmptyFile(url) {
-  return requestWithoutResponseBody(url, { method: "PUT", headers: { "If-None-Match": "*" }, body: "" });
 }
 
 /** @param {string} url */
@@ -351,10 +281,9 @@ export function resourceExists(url) {
  * @param {string} destinationUrl
  * @param {boolean} overwrite
  * @param {string} [mutationVersion]
- * @param {string} [sourceEtag]
  */
-export function moveResource(sourceUrl, destinationUrl, overwrite, mutationVersion, sourceEtag) {
-  const preconditionHeaders = sourceMutationHeaders(mutationVersion, sourceEtag);
+export function moveResource(sourceUrl, destinationUrl, overwrite, mutationVersion) {
+  const preconditionHeaders = sourceMutationHeaders(mutationVersion);
   return requestWithoutResponseBody(sourceUrl, {
     method: "MOVE",
     headers: {
@@ -585,32 +514,4 @@ function cancelResponseBody(response, reason) {
     // English: The protocol/size error remains authoritative when cancelling
     // an already failed transport also rejects.
   }
-}
-
-/**
- * 生成不会出现在 URL 中的 Bearer 令牌，并通过 Authorization 头下载。该路径只用于显式
- * 有界的小文件；大文件或大小未知的文件使用浏览器普通导航。
- *
- * Generate a bearer token without putting it in a URL and download through an
- * Authorization header. This path is reserved for small, explicitly bounded
- * files; large or unknown-size downloads use ordinary browser navigation.
- *
- * @param {string} url
- * @param {number} maxBytes
- */
-export async function downloadWithToken(url, maxBytes) {
-  const tokenResponse = await request(`${url}${url.includes("?") ? "&" : "?"}tokengen`, {
-    method: "POST",
-    cache: "no-store",
-  });
-  const token = await readBoundedText(tokenResponse, MAX_BEARER_TOKEN_BYTES);
-  if (!token) throw new Error("The server returned an empty download token");
-  if (!/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token)) {
-    throw new Error("The server returned an invalid download token");
-  }
-  const download = await request(url, {
-    headers: { Authorization: `Bearer ${token}` },
-    cache: "no-store",
-  });
-  return readBoundedDownloadBlob(download, maxBytes);
 }

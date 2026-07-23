@@ -94,8 +94,8 @@ fn allow_delete_no_override(#[with(&["--allow-delete"])] server: TestServer) -> 
 fn allow_upload_delete_can_override(#[with(&["-A"])] server: TestServer) -> Result<(), Error> {
     let url = format!("{}index.html", server.url());
     let resp = fetch!(b"PUT", &url).body(b"abc".to_vec()).send()?;
-    // 覆盖现有资源虽成功却未新建资源，因此 HTTP/WebDAV 语义要求 204 而非 201。
-    // Overwriting succeeds without creating a resource, so HTTP/WebDAV requires 204 rather than 201.
+    // 覆盖现有资源成功但未新建资源，因此返回 204 而非 201。
+    // Overwriting succeeds without creating a resource, so return 204 rather than 201.
     assert_eq!(resp.status(), 204);
     assert_eq!(reqwest::blocking::get(&url)?.text()?, "abc");
     Ok(())
@@ -222,22 +222,6 @@ fn configured_upload_modes_apply_to_new_files_and_ancestors(
 }
 
 #[rstest]
-fn patch_preserves_only_existing_ordinary_mode_bits(
-    #[with(&["-A"])] server: TestServer,
-) -> Result<(), Error> {
-    let path = server.path().join("patch-mode.bin");
-    std::fs::write(&path, b"old")?;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o2740))?;
-    let response = fetch!(b"PATCH", format!("{}patch-mode.bin", server.url()))
-        .header("X-Update-Range", "append")
-        .body(b"+new".to_vec())
-        .send()?;
-    assert_eq!(response.status(), 204);
-    assert_eq!(std::fs::metadata(path)?.mode() & 0o7777, 0o740);
-    Ok(())
-}
-
-#[rstest]
 fn uploads_refuse_to_replace_a_non_regular_node(
     #[with(&["--allow-upload"])] server: TestServer,
 ) -> Result<(), Error> {
@@ -252,29 +236,7 @@ fn uploads_refuse_to_replace_a_non_regular_node(
         .body("replacement")
         .send()?;
     assert_eq!(resp.status(), 403);
-    let resp = fetch!(b"PATCH", format!("{}pipe", server.url()))
-        .header("X-Update-Range", "append")
-        .body("replacement")
-        .send()?;
-    assert_eq!(resp.status(), 403);
     assert!(std::fs::symlink_metadata(fifo)?.file_type().is_fifo());
-    Ok(())
-}
-
-#[rstest]
-fn max_upload_size_still_checks_patch_final_size(
-    #[with(&["--allow-upload", "--max-upload-size", "8"])] server: TestServer,
-) -> Result<(), Error> {
-    let path = server.path().join("patch.bin");
-    std::fs::write(&path, b"1234567")?;
-    let url = format!("{}patch.bin", server.url());
-
-    let resp = fetch!(b"PATCH", &url)
-        .header("X-Update-Range", "append")
-        .body(b"89".to_vec())
-        .send()?;
-    assert_eq!(resp.status(), 413);
-    assert_eq!(std::fs::read(path)?, b"1234567");
     Ok(())
 }
 
@@ -311,73 +273,6 @@ fn put_size_limit_has_identical_declared_and_streaming_boundaries(
             }
         }
     }
-    wait_for_no_upload_candidates(server.path(), Duration::from_secs(3))?;
-    Ok(())
-}
-
-#[rstest]
-fn patch_size_limit_covers_minus_one_equal_plus_one_and_u64_overflow(
-    #[with(&["--allow-upload", "--max-upload-size", "8"])] server: TestServer,
-) -> Result<(), Error> {
-    let client = reqwest::blocking::Client::new();
-    for (transport, streaming) in [("declared", false), ("streaming", true)] {
-        for (final_size, incoming, expected) in [
-            (7, b"67".as_slice(), reqwest::StatusCode::NO_CONTENT),
-            (8, b"678".as_slice(), reqwest::StatusCode::NO_CONTENT),
-            (
-                9,
-                b"6789".as_slice(),
-                reqwest::StatusCode::PAYLOAD_TOO_LARGE,
-            ),
-        ] {
-            let name = format!("patch-{transport}-{final_size}.bin");
-            let path = server.path().join(&name);
-            std::fs::write(&path, b"12345")?;
-            let request = client
-                .patch(format!("{}{name}", server.url()))
-                .header("X-Update-Range", "append");
-            let response = if streaming {
-                request
-                    .body(reqwest::blocking::Body::new(Cursor::new(incoming.to_vec())))
-                    .send()?
-            } else {
-                request.body(incoming.to_vec()).send()?
-            };
-            assert_eq!(
-                response.status(),
-                expected,
-                "{transport} final_size={final_size}"
-            );
-            if expected == reqwest::StatusCode::NO_CONTENT {
-                let mut expected_content = b"12345".to_vec();
-                expected_content.extend_from_slice(incoming);
-                assert_eq!(std::fs::read(path)?, expected_content);
-            } else {
-                assert_eq!(std::fs::read(path)?, b"12345");
-            }
-        }
-
-        let overflow_name = format!("patch-{transport}-overflow.bin");
-        let overflow = server.path().join(&overflow_name);
-        std::fs::write(&overflow, b"base")?;
-        let request = client
-            .patch(format!("{}{overflow_name}", server.url()))
-            .header("X-Update-Range", format!("bytes={}-", u64::MAX));
-        let response = if streaming {
-            request
-                .body(reqwest::blocking::Body::new(Cursor::new(vec![b'x'])))
-                .send()?
-        } else {
-            request.body(vec![b'x']).send()?
-        };
-        assert_eq!(
-            response.status(),
-            reqwest::StatusCode::PAYLOAD_TOO_LARGE,
-            "{transport} overflow"
-        );
-        assert_eq!(std::fs::read(overflow)?, b"base");
-    }
-
     wait_for_no_upload_candidates(server.path(), Duration::from_secs(3))?;
     Ok(())
 }

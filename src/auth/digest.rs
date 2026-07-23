@@ -90,12 +90,12 @@ impl Default for DigestReplayCache {
 
 impl DigestReplayCache {
     /// 返回 true 时会原子地记录这次精确 `(nonce,user,cnonce,nc)`。
-    /// 不要只记录最大 nc：HTTP/2 并发请求可能 nc=2 先于 nc=1 到达，
+    /// 不要只记录最大 nc：并发请求可能 nc=2 先于 nc=1 到达，
     /// 两个未用过的计数都应被接受。满容量时不驱逐仍有效记录，
     /// 因为驱逐会让
     /// 已被接受过的 Authorization 再次变得可重放。
     /// Atomically record the exact tuple. Do not retain only the largest nc or
-    /// evict live entries: HTTP/2 may reorder counts, and eviction re-enables replay.
+    /// evict live entries: concurrent requests may reorder counts, and eviction re-enables replay.
     pub(super) fn accept(
         &mut self,
         attempt: DigestReplayAttempt,

@@ -7,13 +7,12 @@ mod utils;
 
 use assert_cmd::prelude::*;
 use digest_auth_util::send_with_digest_auth;
-use fixtures::{Error, ServerProc, TestServer, port, ram_command, server, tmpdir};
+use fixtures::{Error, TestServer, port, server, tmpdir};
 use indexmap::IndexSet;
 use predicates::prelude::PredicateBooleanExt;
 use rstest::rstest;
-use std::fs;
 #[cfg(unix)]
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::symlink;
 use std::process::Command;
 use std::time::Duration;
 
@@ -184,100 +183,6 @@ fn authentication_failures_are_rate_limited_per_source_and_user(
     Ok(())
 }
 
-#[test]
-fn trusted_forwarding_identity_drives_auth_limits_and_access_logs() -> Result<(), Error> {
-    let root = tmpdir();
-    let port = port();
-    let mut cmd = ram_command(root.path(), port);
-    cmd.args([
-        "--auth",
-        "user:pass@/:rw",
-        "--trusted-proxy",
-        "127.0.0.1/32",
-        "--trusted-proxy-header",
-        "x-forwarded-for",
-        "--log-format",
-        "$remote_addr",
-    ]);
-    let server = ServerProc::spawn(cmd);
-    let client = reqwest::blocking::Client::new();
-    let url = format!("http://127.0.0.1:{port}/index.html");
-
-    let malformed = client
-        .get(&url)
-        .header("x-forwarded-for", "not-an-ip")
-        .basic_auth("user", Some("pass"))
-        .send()?;
-    assert_eq!(malformed.status(), 400);
-    assert_eq!(malformed.text()?, "Invalid forwarding header");
-
-    for _ in 0..4 {
-        let response = client
-            .get(&url)
-            .header("x-forwarded-for", "198.51.100.10")
-            .basic_auth("user", Some("wrong"))
-            .send()?;
-        assert_eq!(response.status(), 401);
-    }
-    let limited = client
-        .get(&url)
-        .header("x-forwarded-for", "198.51.100.10")
-        .basic_auth("user", Some("wrong"))
-        .send()?;
-    assert_eq!(limited.status(), 429);
-
-    // 同一可信代理后的另一已验证客户端拥有独立认证预算。
-    // A distinct verified client behind the same trusted proxy has an independent authentication budget.
-    let independent = client
-        .get(&url)
-        .header("x-forwarded-for", "198.51.100.11")
-        .basic_auth("user", Some("wrong"))
-        .send()?;
-    assert_eq!(independent.status(), 401);
-    assert_eq!(
-        server.wait_for_stdout_line(|line| line == "198.51.100.10", Duration::from_secs(2),),
-        Some("198.51.100.10".to_owned()),
-        "access logging did not use the same verified source identity"
-    );
-    Ok(())
-}
-
-#[test]
-fn untrusted_forwarding_headers_cannot_split_authentication_buckets() -> Result<(), Error> {
-    let root = tmpdir();
-    let port = port();
-    let mut cmd = ram_command(root.path(), port);
-    cmd.args([
-        "--auth",
-        "user:pass@/:rw",
-        // 有意排除直连 127.0.0.1 对端。 / Deliberately excludes the direct 127.0.0.1 peer.
-        "--trusted-proxy",
-        "127.0.0.2/32",
-        "--trusted-proxy-header",
-        "x-forwarded-for",
-    ]);
-    let _server = ServerProc::spawn(cmd);
-    let client = reqwest::blocking::Client::new();
-    let url = format!("http://127.0.0.1:{port}/index.html");
-
-    for index in 0..4 {
-        let response = client
-            .get(&url)
-            .header("x-forwarded-for", format!("198.51.100.{index}"))
-            .basic_auth("user", Some("wrong"))
-            .send()?;
-        assert_eq!(response.status(), 401);
-    }
-    let limited = client
-        .get(&url)
-        .header("x-forwarded-for", "203.0.113.250")
-        .basic_auth("user", Some("wrong"))
-        .send()?;
-    assert_eq!(limited.status(), 429);
-    assert_eq!(limited.headers().get("retry-after").unwrap(), "1");
-    Ok(())
-}
-
 #[rstest]
 fn unknown_hashed_usernames_share_a_source_rate_limit(
     #[with(&["--auth", "user:$6$gQxZwKyWn/ZmWEA2$4uV7KKMnSUnET2BtWTj/9T5.Jq3h/MdkOlnIl5hdlTxDZ4MZKmJ.kl6C.NL9xnNPqC4lVHC1vuI0E5cLpTJX81@/:rw"])]
@@ -430,10 +335,10 @@ fn digest_auth_rejects_exact_replay_and_accepts_distinct_nc_out_of_order(
         200
     );
 
-    // HTTP/2 乱序：nc=2 先到不得导致尚未使用的 nc=1 被误判为
+    // 不同 HTTP/1.1 连接上的并发请求可能乱序：nc=2 先到不得导致尚未使用的 nc=1 被误判为
     // replay；但 nc=2 本身的第二次仍必须拒绝。
-    // HTTP/2 out of order: accepting nc=2 first must not classify unused nc=1 as replay, while a
-    // second use of nc=2 itself must still be rejected.
+    // Concurrent requests on different HTTP/1.1 connections can arrive out of order. Accepting nc=2
+    // first must not classify unused nc=1 as replay, while a second use of nc=2 must be rejected.
     let mut unordered_context = digest_auth::AuthContext::new_with_method(
         "user",
         "pass",
@@ -518,70 +423,6 @@ fn options_with_invalid_authorization_is_not_treated_as_anonymous(
             .send()?;
         assert_eq!(resp.status(), 401);
     }
-    Ok(())
-}
-
-#[rstest]
-fn options_can_never_generate_a_token(
-    #[with(&["--auth", "user:pass@/:rw"])] server: TestServer,
-) -> Result<(), Error> {
-    let url = format!("{}index.html?tokengen", server.url());
-
-    // 既要覆盖原漏洞的“对的用户名 + 错的密码”，也要
-    // 确认即使是真实凭据，OPTIONS 也不是令牌签发方法。
-    // Cover the original correct-user/wrong-password bug and confirm that even valid credentials do
-    // not turn OPTIONS into a token-issuance method.
-    for pass in ["wrong", "pass"] {
-        let resp = fetch!(b"OPTIONS", &url)
-            .basic_auth("user", Some(pass))
-            .send()?;
-        assert_eq!(resp.status(), 405);
-        assert_eq!(resp.headers().get("allow").unwrap(), "GET, POST");
-        assert!(resp.text()?.is_empty());
-    }
-    Ok(())
-}
-
-#[rstest]
-fn tokengen_accepts_only_get_or_post_with_verified_identity(
-    // 默认路径权限是只读；POST 签发不应错误地要求 rw。
-    // Default path permission is read-only; POST issuance must not incorrectly require read-write.
-    #[with(&["--auth", "user:pass@/"])] server: TestServer,
-) -> Result<(), Error> {
-    let url = format!("{}index.html?tokengen", server.url());
-
-    let resp = fetch!(b"POST", &url)
-        .basic_auth("user", Some("wrong"))
-        .send()?;
-    assert_eq!(resp.status(), 401);
-
-    let resp = fetch!(b"POST", &url)
-        .basic_auth("user", Some("pass"))
-        .send()?;
-    assert_eq!(resp.status(), 200);
-    let token = resp.text()?;
-    assert!(!token.is_empty());
-
-    let resp = fetch!(b"GET", format!("{}index.html", server.url()))
-        .bearer_auth(&token)
-        .send()?;
-    assert_eq!(resp.status(), 200);
-
-    // 下载 token 不能用来给自己无限续期；签发必须重新提交
-    // Basic/Digest 原始凭据。
-    // A download token cannot renew itself indefinitely; issuance must resubmit original Basic/Digest credentials.
-    let resp = fetch!(
-        b"GET",
-        format!("{}index.html?tokengen&token={token}", server.url())
-    )
-    .send()?;
-    assert_eq!(resp.status(), 401);
-
-    let resp = fetch!(b"PUT", &url)
-        .basic_auth("user", Some("pass"))
-        .send()?;
-    assert_eq!(resp.status(), 405);
-    assert_eq!(resp.headers().get("allow").unwrap(), "GET, POST");
     Ok(())
 }
 
@@ -700,56 +541,6 @@ fn auth_readonly(
 }
 
 #[rstest]
-fn editor_capabilities_follow_the_effective_path_acl(
-    #[with(&[
-        "--auth",
-        "reader:pass@/:ro,/dir1:rw",
-        "--allow-all",
-    ])]
-    server: TestServer,
-) -> Result<(), Error> {
-    let readonly = fetch!(b"GET", format!("{}test.txt?edit", server.url()))
-        .basic_auth("reader", Some("pass"))
-        .send()?;
-    assert_eq!(readonly.status(), 200);
-    let readonly_data = utils::retrieve_json(&readonly.text()?).expect("embedded editor data");
-    for capability in ["can_save", "can_delete", "can_move"] {
-        assert_eq!(readonly_data[capability], false, "{capability}");
-    }
-
-    let writable = fetch!(b"GET", format!("{}dir1/test.txt?edit", server.url()))
-        .basic_auth("reader", Some("pass"))
-        .send()?;
-    assert_eq!(writable.status(), 200);
-    let writable_data = utils::retrieve_json(&writable.text()?).expect("embedded editor data");
-    for capability in ["can_save", "can_delete", "can_move"] {
-        assert_eq!(writable_data[capability], true, "{capability}");
-    }
-
-    // 隐藏控件不是授权边界。 / Hiding controls is not an authorization boundary.
-    let denied = fetch!(b"PUT", format!("{}test.txt", server.url()))
-        .basic_auth("reader", Some("pass"))
-        .body("forbidden")
-        .send()?;
-    assert_eq!(denied.status(), 403);
-    Ok(())
-}
-
-#[rstest]
-fn editor_capabilities_combine_independent_global_feature_gates(
-    #[with(&["--auth", "writer:pass@/:rw", "--allow-upload"])] server: TestServer,
-) -> Result<(), Error> {
-    let response = fetch!(b"GET", format!("{}test.txt?edit", server.url()))
-        .basic_auth("writer", Some("pass"))
-        .send()?;
-    let data = utils::retrieve_json(&response.text()?).expect("embedded editor data");
-    assert_eq!(data["can_save"], true);
-    assert_eq!(data["can_delete"], false);
-    assert_eq!(data["can_move"], false);
-    Ok(())
-}
-
-#[rstest]
 fn auth_nest(
     #[with(&["--auth", "user:pass@/:rw", "--auth", "user2:pass2@/", "--auth", "user3:pass3@/dir1:rw", "-A"])]
     server: TestServer,
@@ -789,31 +580,17 @@ fn index_only_intermediate_file_never_becomes_readable(
     let protected = format!("{}test.txt", server.url());
 
     // ACL 允许 IndexOnly 中间节点通过初次只读方法检查，因为它可能是必需
-    // 的目录导航点。一旦 openat2 描述符证明它是文件，内容、元数据与副本都
-    // 必须拒绝。
+    // 的目录导航点。一旦 openat2 描述符证明它是文件，内容与元数据都必须拒绝。
     // IndexOnly provisionally passes read-only ACL checks because an
     // intermediate node may be a required collection. Once openat2 descriptor metadata
-    // proves it is a file, content, metadata, and copying must all be denied.
-    for method in ["GET", "HEAD", "PROPFIND"] {
+    // proves it is a file, content and metadata must both be denied.
+    for method in ["GET", "HEAD"] {
         let response = reqwest::blocking::Client::new()
             .request(reqwest::Method::from_bytes(method.as_bytes())?, &protected)
             .basic_auth("user", Some("pass"))
             .send()?;
         assert_eq!(response.status(), 403, "{method} exposed an IndexOnly file");
     }
-
-    let token = fetch!(b"POST", format!("{protected}?tokengen"))
-        .basic_auth("user", Some("pass"))
-        .send()?;
-    assert_eq!(token.status(), 403);
-
-    let destination = format!("{}dir2/index-only-copy.txt", server.url());
-    let copy = fetch!(b"COPY", &protected)
-        .basic_auth("user", Some("pass"))
-        .header("Destination", &destination)
-        .send()?;
-    assert_eq!(copy.status(), 403);
-    assert!(!server.path().join("dir2/index-only-copy.txt").exists());
 
     let options = fetch!(b"OPTIONS", &protected)
         .basic_auth("user", Some("pass"))
@@ -824,7 +601,7 @@ fn index_only_intermediate_file_never_becomes_readable(
         .get("allow")
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default();
-    for forbidden in ["GET", "HEAD", "PROPFIND", "COPY"] {
+    for forbidden in ["GET", "HEAD"] {
         assert!(!allow.split(", ").any(|method| method == forbidden));
     }
 
@@ -866,7 +643,7 @@ fn auth_basic(
 }
 
 #[rstest]
-fn auth_webdav_move(
+fn auth_move_rejects_destination_outside_the_user_acl(
     #[with(&["--auth", "user:pass@/:rw", "--auth", "user3:pass3@/dir1:rw", "-A"])]
     server: TestServer,
 ) -> Result<(), Error> {
@@ -878,49 +655,6 @@ fn auth_webdav_move(
         "pass3",
     )?;
     assert_eq!(resp.status(), 403);
-    Ok(())
-}
-
-#[rstest]
-fn auth_webdav_copy(
-    #[with(&["--auth", "user:pass@/:rw", "--auth", "user3:pass3@/dir1:rw", "-A"])]
-    server: TestServer,
-) -> Result<(), Error> {
-    let origin_url = format!("{}dir1/test.html", server.url());
-    let new_url = format!("{}test2.html", server.url());
-    let resp = send_with_digest_auth(
-        fetch!(b"COPY", &origin_url).header("Destination", &new_url),
-        "user3",
-        "pass3",
-    )?;
-    assert_eq!(resp.status(), 403);
-    Ok(())
-}
-
-#[cfg(unix)]
-#[rstest]
-fn copy_destination_symlink_is_reauthorized_against_real_acl(
-    #[with(&[
-        "--auth",
-        "user:pass@/dir1:ro,/visible:rw",
-        "--allow-upload",
-        "--allow-symlink"
-    ])]
-    server: TestServer,
-) -> Result<(), Error> {
-    // URL 上的 Destination 位于可写 `/visible`，但真实目标是
-    // 未授权的 `/dir2`。目标 ACL 必须在解析链接后重新判定。
-    // The URL Destination is writable `/visible`, but its real target is unauthorized `/dir2`;
-    // destination ACL must be evaluated again after resolving the link.
-    symlink(server.path().join("dir2"), server.path().join("visible"))?;
-    let source = format!("{}dir1/test.html", server.url());
-    let destination = format!("{}visible/copied.html", server.url());
-    let resp = fetch!(b"COPY", source)
-        .basic_auth("user", Some("pass"))
-        .header("Destination", destination)
-        .send()?;
-    assert_eq!(resp.status(), 403);
-    assert!(!server.path().join("dir2/copied.html").exists());
     Ok(())
 }
 
@@ -968,32 +702,6 @@ fn auth_partial_index(
 }
 
 #[rstest]
-fn no_auth_propfind_dir(
-    #[with(&["--auth", "admin:admin@/:rw", "-A"])] server: TestServer,
-) -> Result<(), Error> {
-    let resp = fetch!(b"PROPFIND", server.url()).send()?;
-    assert_eq!(resp.status(), 401);
-    Ok(())
-}
-
-#[rstest]
-fn auth_propfind_dir(
-    #[with(&["--auth", "admin:admin@/:rw", "--auth", "user:pass@/dir-assets", "-A"])]
-    server: TestServer,
-) -> Result<(), Error> {
-    let resp = send_with_digest_auth(
-        fetch!(b"PROPFIND", server.url()).header("depth", "1"),
-        "user",
-        "pass",
-    )?;
-    assert_eq!(resp.status(), 207);
-    let body = resp.text()?;
-    assert!(body.contains("<D:href>/dir-assets/</D:href>"));
-    assert!(!body.contains("<D:href>/dir1/</D:href>"));
-    Ok(())
-}
-
-#[rstest]
 fn auth_data(#[with(&["-a", "user:pass@/:rw", "-A"])] server: TestServer) -> Result<(), Error> {
     let resp = reqwest::blocking::get(server.url())?;
     assert_eq!(resp.status(), 401);
@@ -1029,172 +737,5 @@ fn auth_user_paths_require_credentials(
     let resp = send_with_digest_auth(fetch!(b"PUT", &url).body(b"abc".to_vec()), "user", "pass")?;
     assert_eq!(resp.status(), 204);
 
-    Ok(())
-}
-
-#[rstest]
-fn token_auth(#[with(&["-a", "user:pass@/"])] server: TestServer) -> Result<(), Error> {
-    let url = format!("{}index.html", server.url());
-    let resp = fetch!(b"GET", &url).send()?;
-    assert_eq!(resp.status(), 401);
-
-    let url = format!("{}index.html?tokengen", server.url());
-    let resp = fetch!(b"GET", &url).send()?;
-    assert_eq!(resp.status(), 401);
-
-    let url = format!("{}index.html?tokengen", server.url());
-    let resp = fetch!(b"GET", &url)
-        .basic_auth("user", Some("pass"))
-        .send()?;
-    let token = resp.text()?;
-    let url = format!("{}index.html", server.url());
-    // 默认禁用查询串凭据。 / Query credentials are disabled by default.
-    let resp = fetch!(b"GET", format!("{url}?token={token}")).send()?;
-    assert_eq!(resp.status(), 401);
-
-    let resp = fetch!(b"GET", &url).bearer_auth(&token).send()?;
-    assert_eq!(resp.status(), 200);
-    let cache_control = resp.headers().get("cache-control").unwrap().to_str()?;
-    assert!(cache_control.contains("private"));
-    assert!(cache_control.contains("no-store"));
-
-    let resp = fetch!(b"HEAD", &url).bearer_auth(&token).send()?;
-    assert_eq!(resp.status(), 200);
-    let cache_control = resp.headers().get("cache-control").unwrap().to_str()?;
-    assert!(cache_control.contains("private"));
-    assert!(cache_control.contains("no-store"));
-
-    // Bearer 凭据不能为自己签发替代品；令牌签发/撤销要求新鲜 Basic/Digest 证明。
-    // A bearer credential cannot mint its replacement; issuance and revocation require fresh Basic/Digest proof.
-    let resp = fetch!(b"GET", format!("{url}?tokengen"))
-        .bearer_auth(&token)
-        .send()?;
-    assert_eq!(resp.status(), 401);
-
-    // 使用原始凭据和敏感请求头撤销确切令牌，绝不用 URL 参数；撤销由 jti 幂等表示。
-    // Revoke the exact token with original credentials and a sensitive header, never URL parameters; jti makes it idempotent.
-    let resp = fetch!(b"POST", &url)
-        .basic_auth("user", Some("pass"))
-        .header("X-Ram-Revoke-Token", &token)
-        .send()?;
-    assert_eq!(resp.status(), 204);
-    assert_eq!(resp.headers().get("cache-control").unwrap(), "no-store");
-    let resp = fetch!(b"GET", &url).bearer_auth(&token).send()?;
-    assert_eq!(resp.status(), 401);
-    Ok(())
-}
-
-#[rstest]
-fn duplicate_credential_and_revocation_headers_are_rejected_without_revoking(
-    #[with(&["-a", "user:pass@/"])] server: TestServer,
-) -> Result<(), Error> {
-    let client = reqwest::blocking::Client::new();
-    let url = format!("{}index.html", server.url());
-    let mut duplicate_authorization = reqwest::header::HeaderMap::new();
-    duplicate_authorization.append("authorization", "Basic dXNlcjpwYXNz".parse()?);
-    duplicate_authorization.append("authorization", "Basic dXNlcjpwYXNz".parse()?);
-    let response = client.get(&url).headers(duplicate_authorization).send()?;
-    assert_eq!(response.status(), 400);
-
-    let token = client
-        .get(format!("{url}?tokengen"))
-        .basic_auth("user", Some("pass"))
-        .send()?
-        .error_for_status()?
-        .text()?;
-    let mut duplicate_revoke = reqwest::header::HeaderMap::new();
-    duplicate_revoke.append("x-ram-revoke-token", token.parse()?);
-    duplicate_revoke.append("x-ram-revoke-token", token.parse()?);
-    let response = client
-        .post(&url)
-        .basic_auth("user", Some("pass"))
-        .headers(duplicate_revoke)
-        .send()?;
-    assert_eq!(response.status(), 400);
-    assert_eq!(client.get(&url).bearer_auth(&token).send()?.status(), 200);
-    Ok(())
-}
-
-#[rstest]
-fn persistent_revocation_is_visible_to_another_live_process(
-    tmpdir: assert_fs::TempDir,
-    port: u16,
-) -> Result<(), Error> {
-    let state_dir = assert_fs::TempDir::new()?;
-    let secret = state_dir.path().join("token.secret");
-    let revocations = state_dir.path().join("revocations.json");
-    fs::write(&secret, b"0123456789abcdef0123456789abcdef")?;
-    fs::set_permissions(&secret, fs::Permissions::from_mode(0o600))?;
-    let second_port = {
-        let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
-        listener.local_addr()?.port()
-    };
-    let command = |listen_port| {
-        let mut command = ram_command(tmpdir.path(), listen_port);
-        command
-            .args(["--auth", "user:pass@/:rw", "--token-secret-file"])
-            .arg(&secret)
-            .args([
-                "--token-audience",
-                "shared-revocation-test",
-                "--token-revocation-file",
-            ])
-            .arg(&revocations);
-        command
-    };
-    let _first = ServerProc::spawn(command(port));
-    let _second = ServerProc::spawn(command(second_port));
-    let first_url = format!("http://localhost:{port}/index.html");
-    let second_url = format!("http://localhost:{second_port}/index.html");
-
-    let token = fetch!(b"GET", format!("{first_url}?tokengen"))
-        .basic_auth("user", Some("pass"))
-        .send()?
-        .error_for_status()?
-        .text()?;
-    assert_eq!(
-        fetch!(b"GET", &second_url)
-            .bearer_auth(&token)
-            .send()?
-            .status(),
-        200
-    );
-    assert_eq!(
-        fetch!(b"POST", &first_url)
-            .basic_auth("user", Some("pass"))
-            .header("X-Ram-Revoke-Token", &token)
-            .send()?
-            .status(),
-        204
-    );
-    assert_eq!(
-        fetch!(b"GET", &second_url)
-            .bearer_auth(&token)
-            .send()?
-            .status(),
-        401
-    );
-
-    let second_token = fetch!(b"GET", format!("{first_url}?tokengen"))
-        .basic_auth("user", Some("pass"))
-        .send()?
-        .error_for_status()?
-        .text()?;
-    fs::write(&revocations, b"{\"version\":2,")?;
-    assert_eq!(
-        fetch!(b"POST", &first_url)
-            .basic_auth("user", Some("pass"))
-            .header("X-Ram-Revoke-Token", &second_token)
-            .send()?
-            .status(),
-        503
-    );
-    assert_eq!(
-        fetch!(b"GET", &second_url)
-            .bearer_auth(&second_token)
-            .send()?
-            .status(),
-        503
-    );
     Ok(())
 }

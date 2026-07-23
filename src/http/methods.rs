@@ -17,14 +17,13 @@ use hyper::Method;
 pub(crate) enum ResourceRoute {
     Read,
     Write,
-    Dav,
     Control,
 }
 
 /// 普通文件/目录资源路由器实现的全部方法。 / Every method implemented by the ordinary file/directory router.
 ///
-/// `POST` 刻意不在其中：它只属于显式 token 端点，不是资源能力。
-/// `POST` is intentionally absent: it belongs only to the token endpoint and is not a resource capability.
+/// `POST` 刻意不在其中：本项目不提供表单提交式资源端点。
+/// `POST` is intentionally absent because this server exposes no form-style resource endpoint.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 #[repr(u8)]
 pub(crate) enum ResourceMethod {
@@ -33,11 +32,7 @@ pub(crate) enum ResourceMethod {
     Options,
     Put,
     Delete,
-    Patch,
-    Propfind,
-    Proppatch,
     Mkcol,
-    Copy,
     Move,
     Checkauth,
     Logout,
@@ -48,8 +43,7 @@ pub(crate) enum ResourceMethod {
 pub(crate) struct ResourceMethodDescriptor {
     pub(crate) method: ResourceMethod,
     pub(crate) name: &'static str,
-    /// 源路径是否只需只读 ACL；COPY 的源只读，目标则独立按写操作授权。
-    /// Whether read-only ACL is sufficient for the source; COPY authorizes its destination independently as a write.
+    /// 源路径是否只需只读 ACL。 / Whether read-only ACL is sufficient for the source.
     pub(crate) readonly_source: bool,
     /// 认证后是否解析条件请求字段。 / Whether conditional request fields are parsed after authentication.
     pub(crate) uses_preconditions: bool,
@@ -73,7 +67,7 @@ const fn descriptor(
 }
 
 /// 资源方法线名与策略的唯一声明位置。 / The sole declaration site for resource-method wire names and policy.
-pub(crate) const RESOURCE_METHODS: [ResourceMethodDescriptor; 13] = [
+pub(crate) const RESOURCE_METHODS: [ResourceMethodDescriptor; 9] = [
     descriptor(ResourceMethod::Get, "GET", true, true, ResourceRoute::Read),
     descriptor(
         ResourceMethod::Head,
@@ -104,40 +98,18 @@ pub(crate) const RESOURCE_METHODS: [ResourceMethodDescriptor; 13] = [
         ResourceRoute::Write,
     ),
     descriptor(
-        ResourceMethod::Patch,
-        "PATCH",
+        ResourceMethod::Mkcol,
+        "MKCOL",
         false,
         true,
         ResourceRoute::Write,
     ),
     descriptor(
-        ResourceMethod::Propfind,
-        "PROPFIND",
-        true,
-        false,
-        ResourceRoute::Dav,
-    ),
-    descriptor(
-        ResourceMethod::Proppatch,
-        "PROPPATCH",
-        false,
-        true,
-        ResourceRoute::Dav,
-    ),
-    descriptor(
-        ResourceMethod::Mkcol,
-        "MKCOL",
-        false,
-        true,
-        ResourceRoute::Dav,
-    ),
-    descriptor(ResourceMethod::Copy, "COPY", true, true, ResourceRoute::Dav),
-    descriptor(
         ResourceMethod::Move,
         "MOVE",
         false,
         true,
-        ResourceRoute::Dav,
+        ResourceRoute::Write,
     ),
     descriptor(
         ResourceMethod::Checkauth,
@@ -156,17 +128,13 @@ pub(crate) const RESOURCE_METHODS: [ResourceMethodDescriptor; 13] = [
 ];
 
 impl ResourceMethod {
-    pub(crate) const ALL: [Self; 13] = [
+    pub(crate) const ALL: [Self; 9] = [
         Self::Get,
         Self::Head,
         Self::Options,
         Self::Put,
         Self::Delete,
-        Self::Patch,
-        Self::Propfind,
-        Self::Proppatch,
         Self::Mkcol,
-        Self::Copy,
         Self::Move,
         Self::Checkauth,
         Self::Logout,
@@ -228,11 +196,9 @@ mod tests {
 
     #[test]
     fn registry_captures_security_policy_instead_of_route_string_matches() {
-        assert!(ResourceMethod::Copy.readonly_source());
         assert!(!ResourceMethod::Move.readonly_source());
-        assert!(ResourceMethod::Proppatch.uses_preconditions());
-        assert!(!ResourceMethod::Propfind.uses_preconditions());
         assert_eq!(ResourceMethod::Get.route(), ResourceRoute::Read);
         assert_eq!(ResourceMethod::Put.route(), ResourceRoute::Write);
+        assert_eq!(ResourceMethod::Move.route(), ResourceRoute::Write);
     }
 }

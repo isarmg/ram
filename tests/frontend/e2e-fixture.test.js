@@ -25,11 +25,10 @@ test("Playwright passes adversarial data paths only through quoted environment e
 
   const source = await readFile("playwright.config.js", "utf8");
   // 中文：回归锁定安全结构：固定命令只展开双引号环境变量，
-  // 不得再把 dataDirectory/tokenRevocationFile 插值到 shell 源文本。
+  // 不得再把 dataDirectory 插值到 shell 源文本。
   // English: lock in the safe structure: a fixed command expands only quoted
-  // environment variables and never interpolates dataDirectory/tokenRevocationFile into shell source.
+  // environment variables and never interpolates dataDirectory into shell source.
   expect(source).toContain('"$RAM_E2E_DATA_DIR"');
-  expect(source).toContain('"$RAM_E2E_TOKEN_REVOCATION_FILE"');
   const command = source.match(/command:\s*([^\n]+)/)?.[1] ?? "";
-  expect(command).not.toMatch(/dataDirectory|tokenRevocationFile|JSON\.stringify/);
+  expect(command).not.toMatch(/dataDirectory|JSON\.stringify/);
 });

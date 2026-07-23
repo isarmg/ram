@@ -1,8 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
-  MAX_BROWSER_TOKEN_DOWNLOAD_BYTES,
   MAX_UPLOAD_TREE_DEPTH,
-  browserTokenDownloadLimit,
   isSafePathSegment,
   invalidateListingMutationVersion,
   mutationVersionForListAction,
@@ -28,32 +26,22 @@ function droppedItem(overrides) {
 }
 
 describe("browser path admission", () => {
-  test("returns only listing snapshots while editor source ETags travel separately", () => {
+  test("returns mutation snapshots only for directory listings", () => {
     const version = "00000000-0000-0000-0000-000000000001.7";
     expect(mutationVersionForListAction({ data: { kind: "Index", mutation_version: version } }))
       .toBe(version);
     expect(() => mutationVersionForListAction({ data: { kind: "Index", mutation_version: null } }))
       .toThrow(/refresh/i);
-    expect(mutationVersionForListAction({ data: { kind: "Edit", mutation_version: null } }))
+    expect(mutationVersionForListAction({ data: { kind: "View", mutation_version: null } }))
       .toBeUndefined();
 
     const listing = { data: { kind: "Index", mutation_version: version } };
     invalidateListingMutationVersion(listing);
     expect(listing.data.mutation_version).toBeNull();
     expect(() => mutationVersionForListAction(listing)).toThrow(/refresh/i);
-    const editor = { data: { kind: "Edit", mutation_version: null } };
-    invalidateListingMutationVersion(editor);
-    expect(editor.data.mutation_version).toBeNull();
-  });
-
-  test("buffers only precisely known small files in the token-download path", () => {
-    expect(browserTokenDownloadLimit(0)).toBe(MAX_BROWSER_TOKEN_DOWNLOAD_BYTES);
-    expect(browserTokenDownloadLimit(MAX_BROWSER_TOKEN_DOWNLOAD_BYTES))
-      .toBe(MAX_BROWSER_TOKEN_DOWNLOAD_BYTES);
-    expect(browserTokenDownloadLimit(MAX_BROWSER_TOKEN_DOWNLOAD_BYTES + 1)).toBeUndefined();
-    // 中文：超过 2^53 的稀疏文件是合法元数据，但不得启用 JS Blob 缓冲。
-    // English: a sparse file above 2^53 is valid metadata, but must not enable JavaScript Blob buffering.
-    expect(browserTokenDownloadLimit(2 ** 53)).toBeUndefined();
+    const viewer = { data: { kind: "View", mutation_version: null } };
+    invalidateListingMutationVersion(viewer);
+    expect(viewer.data.mutation_version).toBeNull();
   });
 
   test("rejects dot segments and separators used by create controls", () => {

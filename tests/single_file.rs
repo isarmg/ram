@@ -104,11 +104,11 @@ fn single_file_method_matrix(tmpdir: TempDir, port: u16) -> Result<(), Error> {
     assert_eq!(resp.headers().get("content-length").unwrap(), "18");
     assert!(resp.bytes()?.is_empty());
 
-    // 即使凭据具有 rw，单文件路由也不会把 PUT/PATCH/DELETE
+    // 即使凭据具有 rw，单文件路由也不会把 PUT/DELETE
     // 误当成下载；它们统一返回带 Allow 的 405。
-    // Even with read-write credentials, single-file routing must not treat PUT/PATCH/DELETE as
+    // Even with read-write credentials, single-file routing must not treat PUT/DELETE as
     // downloads; all return 405 with Allow.
-    for method in [b"PUT".as_ref(), b"PATCH".as_ref(), b"DELETE".as_ref()] {
+    for method in [b"PUT".as_ref(), b"DELETE".as_ref()] {
         let resp = reqwest::blocking::Client::new()
             .request(reqwest::Method::from_bytes(method)?, &url)
             .basic_auth(TEST_AUTH_USER, Some(TEST_AUTH_PASS))
@@ -159,30 +159,5 @@ fn single_file_aliases_share_one_acl_identity(tmpdir: TempDir, port: u16) -> Res
         assert_eq!(resp.status(), 200, "allowed alias {path:?}");
         assert_eq!(resp.text()?, "This is index.html");
     }
-    Ok(())
-}
-
-#[rstest]
-fn single_file_token_uses_canonical_alias_path(tmpdir: TempDir, port: u16) -> Result<(), Error> {
-    let file = tmpdir.path().join("index.html");
-    let mut cmd = ram_command(&file, port);
-    cmd.args(["--auth", "user:pass@/index.html"]);
-    let _server = ServerProc::spawn(cmd);
-
-    let resp = fetch!(b"POST", format!("http://localhost:{port}/?tokengen"))
-        .basic_auth("user", Some("pass"))
-        .send()?;
-    assert_eq!(resp.status(), 200);
-    let token = resp.text()?;
-
-    // 令牌与规范资源绑定，而不是与签发时恰好使用的 `/`
-    // URL 别名绑定，所以换成 `/index.html` 仍是同一文件。
-    // The token binds the canonical resource, not the `/` alias used at issuance; `/index.html`
-    // therefore addresses the same file.
-    let resp = fetch!(b"GET", format!("http://localhost:{port}/index.html"))
-        .bearer_auth(&token)
-        .send()?;
-    assert_eq!(resp.status(), 200);
-    assert_eq!(resp.text()?, "This is index.html");
     Ok(())
 }

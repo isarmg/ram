@@ -6,7 +6,6 @@ use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::TcpListener;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -135,6 +134,13 @@ pub fn port() -> u16 {
     alloc_test_port()
 }
 
+/// 为同一测试中的额外服务器分配一个受跨进程锁保护的端口。
+/// Allocate an additional cross-process-locked port inside one test.
+#[allow(dead_code)]
+pub fn next_port() -> u16 {
+    alloc_test_port()
+}
+
 /// 以临时目录、空闲端口和可选参数运行 ram，并等待服务器启动完成。
 /// Run ram with a temporary directory, free port, and optional arguments, then await readiness.
 #[fixture]
@@ -146,34 +152,27 @@ where
 {
     let tmpdir = tmpdir();
     let port = alloc_test_port();
-    let mut raw_args: Vec<OsString> = args
+    let raw_args: Vec<OsString> = args
         .clone()
         .into_iter()
         .map(|x| x.as_ref().to_os_string())
         .collect();
-    let mut startup_tempdirs = Vec::new();
-    if let Some(key_flag) = raw_args.iter().position(|value| value == "--tls-key") {
-        let source = raw_args
-            .get(key_flag + 1)
-            .expect("--tls-key test argument has a value");
-        let secrets = TempDir::new().expect("failed to create TLS test credential directory");
-        let private_key = secrets.path().join("private-key.pem");
-        fs::copy(Path::new(source), &private_key).expect("failed to copy TLS test private key");
-        fs::set_permissions(&private_key, fs::Permissions::from_mode(0o600))
-            .expect("failed to protect TLS test private key");
-        raw_args[key_flag + 1] = private_key.into_os_string();
-        startup_tempdirs.push(secrets);
-    }
     let has_auth = raw_args.iter().any(|x| x == "--auth" || x == "-a");
+    let has_storage_reserve = raw_args.iter().any(|x| x == "--storage-reserve");
     let mut cmd = ram_command(tmpdir.path(), port);
     if !has_auth {
         cmd.args(["--auth", TEST_AUTH_RULE]);
     }
+    // CI and developer workspaces can legitimately have less than the production 5 GiB reserve.
+    // Individual storage-policy tests pass their own explicit reserve; all other isolated fixtures
+    // use zero so unrelated PUT assertions do not depend on host free space.
+    if !has_storage_reserve {
+        cmd.args(["--storage-reserve", "0"]);
+    }
     cmd.args(raw_args.clone());
-    let is_tls = raw_args.iter().any(|x| x.to_str().unwrap().contains("tls"));
 
     let proc = ServerProc::spawn(cmd);
-    TestServer::new(port, tmpdir, proc, is_tls, !has_auth, startup_tempdirs)
+    TestServer::new(port, tmpdir, proc, !has_auth)
 }
 
 /// 构造一条标准的测试服务器命令：移除宿主环境的显式配置路径，再设置 serve 路径与端口。
@@ -510,34 +509,22 @@ pub struct TestServer {
     port: u16,
     tmpdir: TempDir,
     proc: ServerProc,
-    is_tls: bool,
     auth_in_url: bool,
-    _startup_tempdirs: Vec<TempDir>,
 }
 
 #[allow(dead_code)]
 impl TestServer {
-    pub fn new(
-        port: u16,
-        tmpdir: TempDir,
-        proc: ServerProc,
-        is_tls: bool,
-        auth_in_url: bool,
-        startup_tempdirs: Vec<TempDir>,
-    ) -> Self {
+    pub fn new(port: u16, tmpdir: TempDir, proc: ServerProc, auth_in_url: bool) -> Self {
         Self {
             port,
             tmpdir,
             proc,
-            is_tls,
             auth_in_url,
-            _startup_tempdirs: startup_tempdirs,
         }
     }
 
     pub fn url(&self) -> Url {
-        let protocol = if self.is_tls { "https" } else { "http" };
-        let mut url = Url::parse(&format!("{}://localhost:{}", protocol, self.port)).unwrap();
+        let mut url = Url::parse(&format!("http://localhost:{}", self.port)).unwrap();
         if self.auth_in_url {
             url.set_username(TEST_AUTH_USER).unwrap();
             url.set_password(Some(TEST_AUTH_PASS)).unwrap();

@@ -2,10 +2,10 @@
 //! Typed errors shared by the filesystem, admission-control and HTTP layers.
 //!
 //! 内部错误保留具体原因用于结构化日志；只有 [`ResponseError`] 能分配公开状态码和
-//! 响应文本。协议处理器可以替换公开响应体（例如 WebDAV XML），但不能改变底层分类。
+//! 响应文本。处理器可以替换公开响应体，但不能改变底层分类。
 //! Internal errors keep their concrete cause for structured logging, while [`ResponseError`] is
 //! the only place that assigns public status codes and response text. Protocol handlers may replace
-//! the public body (for example with WebDAV XML) without changing the underlying classification.
+//! the public body without changing the underlying classification.
 
 use super::{Response, body_full};
 
@@ -334,28 +334,13 @@ pub(crate) enum AdmissionResource {
     FilesystemTasks,
     ExpensiveTasks,
     MutationLocks,
-    RequestBodyBytes,
     UploadBytes,
-    CopyBytes,
-    HashBytes,
     ArchiveBytes,
     /// ZIP local/central header 中单个条目名的字节数，上限为 `u16::MAX`（65,535）。
     /// Bytes in one ZIP local/central-header entry name, bounded by `u16::MAX` (65,535).
     ArchiveEntryNameBytes,
     WalkEntries,
     WalkDepth,
-    /// WebDAV 输入属性、扩展名、XML 结构以及渲染响应各自独立计费，避免一个较小维度掩盖
-    /// 另一维度的资源放大。
-    /// WebDAV input properties, expanded names, XML structure, and rendered output are charged
-    /// independently so a small dimension cannot hide amplification in another.
-    WebDavProperties,
-    WebDavNamespaceBytes,
-    WebDavLocalNameBytes,
-    WebDavPropertyNameBytes,
-    WebDavXmlElements,
-    WebDavXmlDepth,
-    WebDavRenderedProperties,
-    WebDavResponseBytes,
 }
 
 impl fmt::Display for AdmissionResource {
@@ -366,22 +351,11 @@ impl fmt::Display for AdmissionResource {
             Self::FilesystemTasks => "filesystem tasks",
             Self::ExpensiveTasks => "expensive tasks",
             Self::MutationLocks => "filesystem mutation locks",
-            Self::RequestBodyBytes => "request-body bytes",
             Self::UploadBytes => "upload bytes",
-            Self::CopyBytes => "copy bytes",
-            Self::HashBytes => "hash input bytes",
             Self::ArchiveBytes => "archive output bytes",
             Self::ArchiveEntryNameBytes => "archive entry-name bytes",
             Self::WalkEntries => "walk entries",
             Self::WalkDepth => "walk depth",
-            Self::WebDavProperties => "WebDAV properties",
-            Self::WebDavNamespaceBytes => "WebDAV namespace bytes",
-            Self::WebDavLocalNameBytes => "WebDAV local-name bytes",
-            Self::WebDavPropertyNameBytes => "WebDAV aggregate property-name bytes",
-            Self::WebDavXmlElements => "WebDAV XML elements",
-            Self::WebDavXmlDepth => "WebDAV XML depth",
-            Self::WebDavRenderedProperties => "WebDAV rendered properties",
-            Self::WebDavResponseBytes => "WebDAV response bytes",
         })
     }
 }
@@ -401,7 +375,6 @@ pub(crate) enum QueueScope {
 pub(crate) enum LimitKind {
     Payload,
     Semantic,
-    Storage,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -503,10 +476,7 @@ impl AdmissionError {
                 kind: AdmissionTimeoutKind::Execution,
                 ..
             }
-            | Self::LimitExceeded {
-                kind: LimitKind::Payload | LimitKind::Semantic | LimitKind::Storage,
-                ..
-            } => None,
+            | Self::LimitExceeded { .. } => None,
         }
     }
 }
@@ -606,22 +576,17 @@ pub(crate) enum ChangedStatus {
     PreconditionFailed,
 }
 
-/// 不改变错误分类的协议专属公开响应体。其值必须是固定且经审查的协议文本；不得传入
+/// 不改变错误分类的公开响应体。其值必须是固定且经审查的文本；不得传入
 /// `Error::to_string` 或从请求派生的路径/请求头值。
-/// Protocol-specific public body which does not alter error classification. Values must be fixed,
+/// Public body which does not alter error classification. Values must be fixed,
 /// reviewed protocol text; never pass `Error::to_string` or request-derived path/header values.
 pub(crate) enum PublicErrorBody {
     Plain(&'static str),
-    Xml(&'static str),
 }
 
 impl PublicErrorBody {
     pub(crate) const fn plain(body: &'static str) -> Self {
         Self::Plain(body)
-    }
-
-    pub(crate) const fn xml(body: &'static str) -> Self {
-        Self::Xml(body)
     }
 }
 
@@ -673,7 +638,6 @@ fn admission_status(error: &AdmissionError) -> StatusCode {
         AdmissionError::LimitExceeded { kind, .. } => match kind {
             LimitKind::Payload => StatusCode::PAYLOAD_TOO_LARGE,
             LimitKind::Semantic => StatusCode::UNPROCESSABLE_ENTITY,
-            LimitKind::Storage => StatusCode::INSUFFICIENT_STORAGE,
         },
     }
 }
@@ -738,13 +702,11 @@ fn apply_response_error(
         response.headers_mut().remove(RETRY_AFTER);
     }
 
-    let (content_type, body) = match body {
-        PublicErrorBody::Plain(body) => ("text/plain; charset=utf-8", body),
-        PublicErrorBody::Xml(body) => ("application/xml; charset=utf-8", body),
-    };
-    response
-        .headers_mut()
-        .insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
+    let PublicErrorBody::Plain(body) = body;
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
     *response.body_mut() = body_full(body);
 }
 
@@ -1041,7 +1003,7 @@ mod tests {
             ),
             (
                 ResponseError::admission(AdmissionError::limit_exceeded(
-                    AdmissionResource::WebDavProperties,
+                    AdmissionResource::WalkEntries,
                     LimitKind::Semantic,
                     10,
                     Some(11),
@@ -1298,15 +1260,6 @@ mod tests {
                 StatusCode::SERVICE_UNAVAILABLE,
             ),
             (
-                ResponseError::admission(AdmissionError::limit_exceeded(
-                    AdmissionResource::WebDavResponseBytes,
-                    LimitKind::Storage,
-                    1024,
-                    Some(1025),
-                )),
-                StatusCode::INSUFFICIENT_STORAGE,
-            ),
-            (
                 ResponseError::http(HttpError::forbidden(io_error("private policy cause"))),
                 StatusCode::FORBIDDEN,
             ),
@@ -1438,7 +1391,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn public_response_never_exposes_internal_cause_and_dav_can_override_body() {
+    async fn public_response_never_exposes_internal_cause() {
         let error = fs(
             FsError::outside_root("resolving", io_error("/private/root/secret")),
             ChangedStatus::Conflict,
@@ -1449,19 +1402,6 @@ mod tests {
         let body = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&body[..], b"Forbidden");
         assert!(!String::from_utf8_lossy(&body).contains("/private"));
-
-        let mut dav_response = Response::new(body_full(Bytes::new()));
-        error.apply_with_body(
-            &mut dav_response,
-            PublicErrorBody::xml("<D:error xmlns:D=\"DAV:\"/>"),
-        );
-        assert_eq!(dav_response.status(), StatusCode::FORBIDDEN);
-        assert_eq!(
-            dav_response.headers().get(CONTENT_TYPE).unwrap(),
-            "application/xml; charset=utf-8"
-        );
-        let body = dav_response.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(&body[..], b"<D:error xmlns:D=\"DAV:\"/>");
     }
 
     #[tokio::test]

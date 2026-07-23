@@ -1,6 +1,5 @@
-//! 对文件系统的**写**操作：上传（PUT/PATCH）、删除（DELETE），
-//! 以及 WebDAV 的写方法 MKCOL/COPY/MOVE——包括 `Destination` 头的
-//! 校验和 RFC 4918 规定的 `Overwrite` 语义。
+//! 对文件系统的**写**操作：上传（PUT）、删除（DELETE）、新建目录（MKCOL）
+//! 和移动（MOVE）。
 //!
 //! 写操作是安全敏感区：每个函数都要考虑"这一步会不会覆盖/删掉
 //! 用户无权动的东西"，注意代码里 allow_upload / allow_delete 与
@@ -13,26 +12,24 @@
 //!   实现上传大小上限，多读到的第 n+1 字节用于识别超限。
 //! - **两阶段发布**：请求体先进入不可公开的 `0600` 候选；取得终局变更锁后重新打开真实
 //!   目标并复核 ACL、HTTP 前置条件与 inode 期望，最后由单次 rename 发布。
-//! - **外部配额策略**：只执行启动时捕获的钩子描述符。单线程 helper 清空环境、安装
-//!   `PDEATHSIG` 后 `exec`，超时/取消会终止其进程组并回收直系子进程。
 //!
-//! This module implements filesystem mutations: PUT/PATCH uploads, DELETE, and WebDAV MKCOL/COPY/MOVE,
-//! including `Destination` validation and RFC 4918 `Overwrite` semantics. Every path is security
+//! This module implements filesystem mutations: PUT uploads, DELETE, MKCOL, and MOVE.
+//! Every path is security
 //! sensitive: upload/delete policy and containment checks must jointly prevent modification of an
 //! unauthorized object. Upload bodies flow through a bounded two-chunk channel into a synchronous
 //! disk worker for backpressure, and `take(n)` reads one sentinel byte beyond a configured limit.
 //! Publication is two-phase: bytes first enter a private `0600` candidate, then final mutation locks
-//! protect descriptor-based ACL/precondition/identity revalidation before one rename. External quota
-//! policy executes only the startup-pinned hook through a clean-environment, parent-bound helper whose
-//! process group is terminated and reaped on timeout or cancellation.
+//! protect descriptor-based ACL/precondition/identity revalidation before one rename.
 
 use super::error::{
     AdmissionError, AdmissionResource, ChangedStatus, FsError, HttpError, LimitKind,
     MutationEndpointRole, QueueScope, ResponseError, ResponseErrorRef,
 };
 #[cfg(test)]
+use super::filesystem::NodeKind;
+#[cfg(test)]
 use super::filesystem::RootFs;
-use super::filesystem::{EntryExpectation, NodeKind, OpenedNode, TempFile};
+use super::filesystem::{EntryExpectation, OpenedNode, TempFile};
 use super::preconditions::ParsedPreconditions;
 use super::reply::{status_bad_request, status_forbid, status_no_content};
 use super::walk::{
@@ -40,26 +37,22 @@ use super::walk::{
 };
 use super::{MutationGuards, Request, Response, Server, extract_cache_headers};
 use crate::http::IncomingStream;
-use crate::identity::{PathIdentity, SourceIdentity};
+use crate::identity::SourceIdentity;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use futures_util::StreamExt;
 use headers::{HeaderMap, IfNoneMatch};
 use hyper::{
-    Method, StatusCode, Uri,
+    StatusCode, Uri,
     header::{CONTENT_LENGTH, HOST, HeaderValue},
 };
-use std::ffi::OsString;
 use std::fs::File;
 #[cfg(test)]
 use std::io;
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
-use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
-use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 pub(super) struct StagedUpload {
     temp: TempFile,
@@ -82,95 +75,18 @@ enum UploadFeedFailure {
 
 const CANCELLED_UPLOAD_CLEANUP_GRACE: Duration = Duration::from_millis(250);
 
-/// 一次原子上传发布所观察并重新验证的全部状态。集中保存可防止 PUT/PATCH 调用点把偏移或
-/// 存在标志与另一探测的元数据错误配对。
+/// 一次原子上传发布所观察并重新验证的全部状态。
 /// All state observed/revalidated for one atomic upload publication. Keeping it together prevents
-/// PUT/PATCH from pairing an offset/existence flag with metadata from another probe.
+/// callers from pairing existence state with metadata from another probe.
 pub(super) struct UploadCommit {
-    pub(super) upload_offset: Option<u64>,
     pub(super) original: Option<OpenedNode>,
     pub(super) staged: StagedUpload,
     pub(super) mutation_guards: MutationGuards,
     pub(super) changed_status: ChangedStatus,
 }
 
-/// 早期上传大小准入使用的表示状态。PATCH 会在提交工作线程中用权威描述符元数据重新评估；
-/// 此乐观副本只用于在读取前拒绝明显过大的请求体。
-/// Representation state for early upload-size admission. PATCH is re-evaluated from authoritative
-/// descriptor metadata in the commit worker; this optimistic copy only rejects obvious oversize.
-#[derive(Clone, Copy, Debug)]
-pub(super) struct UploadProjection {
-    current_size: u64,
-    offset: Option<u64>,
-}
-
-impl UploadProjection {
-    pub(super) const fn put() -> Self {
-        Self {
-            current_size: 0,
-            offset: None,
-        }
-    }
-
-    pub(super) const fn patch(current_size: u64, offset: u64) -> Self {
-        Self {
-            current_size,
-            offset: Some(offset),
-        }
-    }
-
-    fn projected(self, incoming_len: u64, limit: u64) -> Result<u64, UploadSizeExceeded> {
-        projected_upload_size(self.current_size, self.offset, incoming_len, limit)
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct UploadSizeExceeded;
-
-/// 不执行变更地计算 PUT/PATCH 最终表示长度。
-/// Compute the final representation length for PUT/PATCH without mutation.
-///
-/// `offset == None` 表示 PUT 并替换旧表示；PATCH 取现有长度与 `offset + incoming_len` 的
-/// 较大值。每次加法都检查，算术溢出和超配置上限都映射为稳定 HTTP 413。零上限是有文档的
-/// 显式无限模式，但绝不关闭溢出检测。
-/// `offset == None` is PUT and replaces the old representation. PATCH keeps the longer of existing
-/// length and `offset + incoming_len`. All addition is checked; overflow/limit violations are 413.
-/// Zero explicitly means unlimited but never disables overflow detection.
-pub(super) fn projected_upload_size(
-    current_size: u64,
-    offset: Option<u64>,
-    incoming_len: u64,
-    limit: u64,
-) -> Result<u64, UploadSizeExceeded> {
-    let projected = match offset {
-        Some(offset) => {
-            current_size.max(offset.checked_add(incoming_len).ok_or(UploadSizeExceeded)?)
-        }
-        None => incoming_len,
-    };
-    if limit > 0 && projected > limit {
-        Err(UploadSizeExceeded)
-    } else {
-        Ok(projected)
-    }
-}
-
-fn upload_size_error(limit: u64, observed: Option<u64>) -> anyhow::Error {
-    anyhow::Error::new(AdmissionError::limit_exceeded(
-        AdmissionResource::UploadBytes,
-        LimitKind::Payload,
-        limit,
-        observed,
-    ))
-}
-
-fn copy_size_error(limit: u64, observed: Option<u64>) -> anyhow::Error {
-    anyhow::Error::new(AdmissionError::limit_exceeded(
-        AdmissionResource::CopyBytes,
-        LimitKind::Storage,
-        limit,
-        observed,
-    ))
+fn upload_size_allowed(size: u64, limit: u64) -> bool {
+    size <= limit
 }
 
 fn local_path_error(detail: &'static str) -> anyhow::Error {
@@ -178,26 +94,20 @@ fn local_path_error(detail: &'static str) -> anyhow::Error {
 }
 
 fn upload_body_transport_error(source: anyhow::Error) -> anyhow::Error {
-    anyhow::Error::new(HttpError::bad_request(source))
-        .context("reading PUT/PATCH request body transport")
-}
-
-fn copy_cancellation_error(context: &'static str) -> anyhow::Error {
-    anyhow::Error::new(AdmissionError::cancelled(AdmissionResource::CopyBytes)).context(context)
+    anyhow::Error::new(HttpError::bad_request(source)).context("reading PUT request body transport")
 }
 
 impl Server {
-    /// 获取变更锁前把 PUT/PATCH 请求体接收到私有候选中。若目标父目录已存在，PUT 可直接
+    /// 获取变更锁前把 PUT 请求体接收到私有候选中。若目标父目录已存在，PUT 可直接
     /// 发布同一候选。暂存期间刻意不创建缺失祖先；回退候选位于固定服务根中，只在变更锁下
     /// 重新评估授权/前置条件后复制。
-    /// Receive a PUT/PATCH body into a private candidate before mutation locking. If the parent exists,
+    /// Receive a PUT body into a private candidate before mutation locking. If the parent exists,
     /// PUT can publish it directly. Staging never creates ancestors; a root fallback is copied only
     /// after authorization/preconditions are re-evaluated under the lock.
     pub(super) async fn stage_upload(
         &self,
         path: &Path,
         req: Request,
-        projection: UploadProjection,
         user: Option<&str>,
         source: SourceIdentity,
         res: &mut Response,
@@ -209,7 +119,7 @@ impl Server {
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.parse::<u64>().ok());
         if let Some(length) = declared_length
-            && projection.projected(length, max_upload_size).is_err()
+            && !upload_size_allowed(length, max_upload_size)
         {
             ResponseError::admission(AdmissionError::limit_exceeded(
                 AdmissionResource::UploadBytes,
@@ -271,11 +181,7 @@ impl Server {
         let upload_idle_timeout = Duration::from_secs(self.args.upload_idle_timeout);
         let upload_deadline =
             tokio::time::Instant::now() + Duration::from_secs(self.args.upload_total_timeout);
-        let operation_name = if req.method() == Method::PATCH {
-            "PATCH"
-        } else {
-            "PUT"
-        };
+        let operation_name = "PUT";
         let response_user = user.map(str::to_owned);
         let worker_path = path.to_path_buf();
         let fs_root = self.fs_root.clone();
@@ -317,9 +223,10 @@ impl Server {
                         ))
                         .context("upload staging request was cancelled"));
                     }
-                    let next = projected_upload_size(0, Some(received), chunk.len() as u64, 0)
-                        .and_then(|next| projection.projected(next, max_upload_size).map(|_| next))
-                        .map_err(|_| {
+                    let next = received
+                        .checked_add(chunk.len() as u64)
+                        .filter(|next| upload_size_allowed(*next, max_upload_size))
+                        .ok_or_else(|| {
                             anyhow::Error::new(AdmissionError::limit_exceeded(
                                 AdmissionResource::UploadBytes,
                                 LimitKind::Payload,
@@ -352,13 +259,12 @@ impl Server {
                 (tokio::time::Instant::now() + upload_idle_timeout).min(upload_deadline);
             match tokio::time::timeout_at(next_deadline, stream.next()).await {
                 Ok(Some(Ok(chunk))) => {
-                    let Ok(next) = projected_upload_size(0, Some(queued), chunk.len() as u64, 0)
+                    let Some(next) = queued
+                        .checked_add(chunk.len() as u64)
+                        .filter(|next| upload_size_allowed(*next, max_upload_size))
                     else {
                         break Err(UploadFeedFailure::TooLarge);
                     };
-                    if projection.projected(next, max_upload_size).is_err() {
-                        break Err(UploadFeedFailure::TooLarge);
-                    }
                     match tokio::time::timeout_at(upload_deadline, chunk_tx.send(chunk)).await {
                         Ok(Ok(())) => queued = next,
                         Ok(Err(_)) => break Err(UploadFeedFailure::WorkerStopped),
@@ -432,11 +338,8 @@ impl Server {
         }
     }
 
-    /// 上传（PUT 整文件 / PATCH 断点续传）。
-    /// `upload_offset`：None = 从头新建/覆盖；Some(offset) = 从 offset 续写，
-    /// offset 等于当前大小时是纯追加。
-    /// Upload via full-file PUT or resumable PATCH. `None` creates/replaces from the start;
-    /// `Some(offset)` resumes there, and an offset equal to current length is a pure append.
+    /// 以 PUT 原子新建或替换一个完整文件。
+    /// Atomically create or replace one complete file with PUT.
     pub(super) async fn handle_upload(
         &self,
         path: &Path,
@@ -444,7 +347,6 @@ impl Server {
         res: &mut Response,
     ) -> Result<()> {
         let UploadCommit {
-            upload_offset,
             original,
             staged,
             mutation_guards,
@@ -455,10 +357,6 @@ impl Server {
             .map(|opened| EntryExpectation::from_metadata(&opened.metadata))
             .unwrap_or(EntryExpectation::Missing);
         let target_exists = matches!(expected_target, EntryExpectation::Present(_));
-        let observed_size = original
-            .as_ref()
-            .map(|opened| opened.metadata.len())
-            .unwrap_or(0);
         let max_upload_size = self.args.max_upload_size;
         let StagedUpload {
             temp: staged_temp,
@@ -466,8 +364,7 @@ impl Server {
             user: staged_user,
         } = staged;
 
-        if projected_upload_size(observed_size, upload_offset, staged_len, max_upload_size).is_err()
-        {
+        if !upload_size_allowed(staged_len, max_upload_size) {
             ResponseError::admission(AdmissionError::limit_exceeded(
                 AdmissionResource::UploadBytes,
                 LimitKind::Payload,
@@ -478,12 +375,10 @@ impl Server {
             return Ok(());
         }
 
-        // 发布、fsync、PATCH 基础复制和可选配额钩子均在一个拥有所有权的阻塞任务中执行。上传
-        // 准入附着于 staged_temp 并随它进入工作线程；昂贵任务 permit 是显式工作守卫。因此
-        // 丢弃/超时请求不会在内核 I/O 或候选清理仍继续时把容量显示为空闲。
-        // Publication, fsync, PATCH base copy, and optional quota hook run in one owned blocking job.
-        // Admission follows staged_temp; the expensive permit guards the worker, so cancellation cannot
-        // make capacity appear free while kernel I/O or cleanup continues.
+        // 发布和 fsync 在拥有全部资源的阻塞任务中执行。上传准入附着于 staged_temp 并随它
+        // 进入工作线程；昂贵任务 permit 是显式工作守卫。
+        // Publication and fsync run in one owned blocking job. Admission follows staged_temp and the
+        // expensive permit guards the worker until all kernel I/O and cleanup have completed.
         let expensive_permit = match self.expensive_task_limit.clone().try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
@@ -512,11 +407,7 @@ impl Server {
                 ),
             ));
             return map_local_mutation_error(
-                if upload_offset.is_some() {
-                    "PATCH"
-                } else {
-                    "PUT"
-                },
+                "PUT",
                 path,
                 staged_user.as_deref(),
                 error,
@@ -527,45 +418,16 @@ impl Server {
         let old_permissions = original.as_ref().map(|opened| {
             std::fs::Permissions::from_mode(opened.metadata.permissions().mode() & 0o777)
         });
-        let direct_put = upload_offset.is_none() && staged_temp.target_rel() == path;
+        let direct_put = staged_temp.target_rel() == path;
         let staged_temp = staged_temp.into_blocking()?;
-        let mut source = match upload_offset {
-            Some(_) => Some(
-                original
-                    .ok_or_else(|| {
-                        anyhow::Error::new(FsError::changed(
-                            MutationEndpointRole::Target,
-                            path.display().to_string(),
-                            format!("{expected_target:?}"),
-                            "PATCH source disappeared before publication",
-                        ))
-                    })?
-                    .file
-                    .into_std()
-                    .context("converting the guarded PATCH source")?,
-            ),
-            None => None,
-        };
+        drop(original);
         let fs_root = self.fs_root.clone();
         let path = path.to_path_buf();
         let worker_path = path.clone();
-        let allow_delete = self.args.allow_delete;
         let upload_file_mode = self.args.upload_file_mode;
         let upload_dir_mode = self.args.upload_dir_mode;
         let storage_space_check = self.args.storage_space_check;
         let storage_reserve = self.args.storage_reserve;
-        let quota_hook = self
-            .args
-            .startup_paths
-            .as_ref()
-            .and_then(|paths| paths.storage_quota_hook())
-            .cloned();
-        let quota_hook_timeout = Duration::from_secs(self.args.storage_quota_hook_timeout);
-        let operation_name = if upload_offset.is_some() {
-            "PATCH"
-        } else {
-            "PUT"
-        };
         let response_user = staged_user.clone();
 
         let operation = spawn_supervised_blocking_with_shutdown(
@@ -592,101 +454,14 @@ impl Server {
                     candidate
                 };
 
-                let actual_base_size = if let (Some(offset), Some(source)) =
-                    (upload_offset, source.as_mut())
-                {
-                    let source_metadata = source.metadata()?;
-                    if !expected_target.matches_metadata(&source_metadata) {
-                        return Err(anyhow::Error::new(super::error::FsError::changed(
-                            MutationEndpointRole::Target,
-                            worker_path.display().to_string(),
-                            format!("{expected_target:?}"),
-                            format!("{:?}", EntryExpectation::from_metadata(&source_metadata)),
-                        )));
-                    }
-                    let actual_size = source_metadata.len();
-                    if projected_upload_size(actual_size, Some(offset), staged_len, max_upload_size)
-                        .is_err()
-                    {
-                        return Err(upload_size_error(max_upload_size, Some(staged_len)));
-                    }
-                    if offset > actual_size {
-                        return Err(anyhow::Error::new(FsError::conflict(
-                            "validating PATCH offset",
-                            anyhow!("PATCH offset exceeds the current representation length"),
-                        )));
-                    }
-                    if offset < actual_size && !allow_delete {
-                        return Err(anyhow::Error::new(HttpError::forbidden(anyhow!(
-                            "PATCH would overwrite existing representation bytes"
-                        ))));
-                    }
-                    actual_size
-                } else {
-                    0
-                };
-                let final_size = projected_upload_size(
-                    actual_base_size,
-                    upload_offset,
-                    staged_len,
-                    max_upload_size,
-                )
-                .map_err(|_| upload_size_error(max_upload_size, None))?;
-
-                run_storage_quota_hook(
-                    quota_hook.as_ref(),
-                    quota_hook_timeout,
-                    staged_user.as_deref(),
-                    operation_name,
-                    &worker_path,
-                    observed_size,
-                    final_size,
-                    &cancellation,
-                )?;
                 if storage_space_check {
-                    // 直接 PUT 候选已包含请求体；PATCH/回退 PUT 会在旧表示仍可达时分配第二个
-                    // 完整候选。
-                    // A direct PUT candidate already contains its body. PATCH/fallback PUT allocates a
-                    // second complete candidate while the old representation remains reachable.
-                    let additional_bytes = if direct_put { 0 } else { final_size };
+                    // 直接 PUT 候选已包含请求体；回退 PUT 会在旧表示仍可达时分配第二个候选。
+                    // A direct candidate already contains the body; a fallback PUT allocates a second
+                    // candidate while the old representation remains reachable.
+                    let additional_bytes = if direct_put { 0 } else { staged_len };
                     enforce_storage_preflight(&target, additional_bytes, storage_reserve)?;
                 }
 
-                if let (Some(offset), Some(source)) = (upload_offset, source.as_mut()) {
-                    let outcome = copy_regular_file_cooperatively(
-                        source,
-                        target.file_mut(),
-                        (max_upload_size > 0).then_some(max_upload_size),
-                        &cancellation,
-                    )?;
-                    if max_upload_size > 0 && outcome.bytes > max_upload_size {
-                        return Err(upload_size_error(max_upload_size, Some(outcome.bytes)));
-                    }
-                    if outcome.bytes != actual_base_size {
-                        return Err(anyhow::Error::new(FsError::changed(
-                            MutationEndpointRole::Target,
-                            worker_path.display().to_string(),
-                            format!("{actual_base_size} bytes"),
-                            format!("{} bytes copied", outcome.bytes),
-                        )));
-                    }
-                    let source_metadata = source.metadata()?;
-                    if !expected_target.matches_metadata(&source_metadata) {
-                        return Err(anyhow::Error::new(super::error::FsError::changed(
-                            MutationEndpointRole::Target,
-                            worker_path.display().to_string(),
-                            format!("{expected_target:?}"),
-                            format!("{:?}", EntryExpectation::from_metadata(&source_metadata)),
-                        )));
-                    }
-                    if offset > outcome.bytes {
-                        return Err(anyhow::Error::new(FsError::conflict(
-                            "validating PATCH offset after source copy",
-                            anyhow!("PATCH offset exceeds copied representation length"),
-                        )));
-                    }
-                    target.file_mut().seek(SeekFrom::Start(offset))?;
-                }
                 if !direct_put {
                     let staged_temp = staged_temp
                         .as_mut()
@@ -705,18 +480,19 @@ impl Server {
                     .unwrap_or(upload_file_mode)
                     & 0o777;
                 let actual_final_size = target.file_mut().metadata()?.len();
-                if actual_final_size != final_size {
+                if actual_final_size != staged_len {
                     bail!(
-                        "upload candidate length changed: expected {final_size}, got {actual_final_size}"
+                        "upload candidate length changed: expected {staged_len}, got {actual_final_size}"
                     );
                 }
                 target.commit(expected_target, final_mode, &cancellation)
             },
         );
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(self.args.copy_timeout);
+        let deadline =
+            tokio::time::Instant::now() + Duration::from_secs(self.args.expensive_task_timeout);
         if let Err(err) = operation.wait_until(deadline).await {
             return map_local_mutation_error(
-                operation_name,
+                "PUT",
                 &path,
                 response_user.as_deref(),
                 err,
@@ -725,7 +501,7 @@ impl Server {
             );
         }
 
-        *res.status_mut() = if upload_offset.is_some() || target_exists {
+        *res.status_mut() = if target_exists {
             StatusCode::NO_CONTENT
         } else {
             StatusCode::CREATED
@@ -790,7 +566,8 @@ impl Server {
                 )
             },
         );
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(self.args.copy_timeout);
+        let deadline =
+            tokio::time::Instant::now() + Duration::from_secs(self.args.expensive_task_timeout);
         if let Err(error) = operation.wait_until(deadline).await {
             return map_local_mutation_error("DELETE", path, None, error, changed_status, res);
         }
@@ -799,8 +576,8 @@ impl Server {
         Ok(())
     }
 
-    /// MKCOL（WebDAV 建目录，Web 界面的"新建文件夹"也走这里）。
-    /// MKCOL creates a WebDAV collection and also backs the web UI's “new folder” action.
+    /// MKCOL 新建目录，Web 界面的“新建文件夹”也走这里。
+    /// MKCOL creates a directory and also backs the web UI's “new folder” action.
     pub(super) async fn handle_mkcol(
         &self,
         path: &Path,
@@ -824,256 +601,6 @@ impl Server {
             Err(err) => {
                 return map_local_mutation_error("MKCOL", path, None, err, changed_status, res);
             }
-        }
-        Ok(())
-    }
-
-    /// COPY：把源文件复制到 `Destination` 头指定的目标路径。
-    /// 目录复制未实现（返回 403），与上游 dufs 保持一致。
-    /// COPY a source file to the `Destination` path. Directory copy is not implemented and returns
-    /// 403, matching upstream dufs behavior.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) async fn handle_copy(
-        &self,
-        source: OpenedNode,
-        dest: &Path,
-        headers: &HeaderMap<HeaderValue>,
-        user: Option<&str>,
-        mutation_guards: MutationGuards,
-        changed_status: ChangedStatus,
-        res: &mut Response,
-    ) -> Result<()> {
-        let overwrite = match overwrite_allowed(headers) {
-            Ok(overwrite) => overwrite,
-            Err(err) => {
-                warn!("Rejected invalid COPY Overwrite header: {err:#}");
-                status_bad_request(res, "Invalid Overwrite header");
-                return Ok(());
-            }
-        };
-
-        if source.metadata.is_dir() {
-            status_forbid(res);
-            return Ok(());
-        }
-        if !source.metadata.is_file() {
-            status_forbid(res);
-            return Ok(());
-        }
-        if source.metadata.len() > self.args.max_copy_size {
-            return map_local_mutation_error(
-                "COPY",
-                dest,
-                user,
-                copy_size_error(self.args.max_copy_size, Some(source.metadata.len())),
-                changed_status,
-                res,
-            );
-        }
-
-        // RFC 4918 要求目标父集合存在；COPY 不得替客户端制造祖先层级。
-        // RFC 4918 requires the destination parent collection to exist; COPY must not manufacture an
-        // ancestor hierarchy for the client.
-        if let Err(error) = self.fs_root.open_parent(dest, false).await {
-            return map_required_parent_error("COPY", dest, user, error, changed_status, res);
-        }
-
-        let expected_destination = match self.fs_root.entry_expectation(dest).await {
-            Ok(expectation) => expectation,
-            Err(error) => {
-                return map_entry_expectation_error("COPY", dest, user, error, changed_status, res);
-            }
-        };
-        let dest_exists = matches!(expected_destination, EntryExpectation::Present(_));
-        if dest_exists {
-            if !overwrite {
-                *res.status_mut() = StatusCode::PRECONDITION_FAILED;
-                return Ok(());
-            }
-            // 路由层对 COPY 只检查了 allow_upload；但覆盖已存在的目标
-            // 等于删掉它原来的内容，所以还必须尊重 allow_delete——
-            // 与 PUT 覆盖非空文件的规则一致。
-            // Routing checks only allow_upload for COPY, but overwriting an existing target deletes its
-            // old contents and must also honor allow_delete, like PUT over a non-empty file.
-            if !self.args.allow_delete {
-                status_forbid(res);
-                return Ok(());
-            }
-            // 此有限 COPY 子集能替换普通文件，不能把集合/特殊节点变成文件。在复制工作线程
-            // 创建候选前拒绝资源形状冲突，否则最终 rename 失败会错误表现为 500。
-            // This finite COPY subset replaces regular files, not collections/special nodes. Reject
-            // shape conflicts before candidate creation so rename failure is not misreported as 500.
-            match self.fs_root.open(dest.to_path_buf(), NodeKind::Any).await {
-                Ok(opened) if opened.metadata.is_file() => {}
-                Ok(opened) => {
-                    let error = anyhow::Error::new(FsError::conflict(
-                        "validating existing COPY destination",
-                        anyhow!(
-                            "destination is not a regular file (mode={:o})",
-                            opened.metadata.mode() & 0o170000
-                        ),
-                    ));
-                    return map_existing_destination_error(
-                        "COPY",
-                        dest,
-                        user,
-                        error,
-                        overwrite,
-                        changed_status,
-                        res,
-                    );
-                }
-                Err(error) => {
-                    return map_existing_destination_error(
-                        "COPY",
-                        dest,
-                        user,
-                        error,
-                        overwrite,
-                        changed_status,
-                        res,
-                    );
-                }
-            }
-        }
-
-        let dest_acl = dest
-            .to_str()
-            .and_then(|dest| user.and_then(|user| self.args.auth.guard_dest_for_user(user, dest)));
-        if dest_acl.is_none() {
-            status_forbid(res);
-            return Ok(());
-        }
-        let expected_source = EntryExpectation::from_metadata(&source.metadata);
-        let source_path = source.real_rel.clone();
-        let source_mode = source.metadata.permissions().mode() & 0o777;
-        let mut source_file = source
-            .file
-            .into_std()
-            .context("converting the guarded COPY source")?;
-        let expensive_permit = match self.expensive_task_limit.clone().try_acquire_owned() {
-            Ok(permit) => permit,
-            Err(_) => {
-                ResponseError::admission(AdmissionError::queue_full(
-                    AdmissionResource::ExpensiveTasks,
-                    QueueScope::WorkerPool,
-                    self.args.max_expensive_tasks,
-                ))
-                .apply(res);
-                return Ok(());
-            }
-        };
-        let fs_root = self.fs_root.clone();
-        let destination = dest.to_path_buf();
-        let worker_destination = destination.clone();
-        let copy_limit = self.args.max_copy_size;
-        let upload_dir_mode = self.args.upload_dir_mode;
-        let storage_space_check = self.args.storage_space_check;
-        let storage_reserve = self.args.storage_reserve;
-        let quota_hook = self
-            .args
-            .startup_paths
-            .as_ref()
-            .and_then(|paths| paths.storage_quota_hook())
-            .cloned();
-        let quota_hook_timeout = Duration::from_secs(self.args.storage_quota_hook_timeout);
-        let quota_user = user.map(str::to_owned);
-        let response_user = quota_user.clone();
-
-        let operation = spawn_supervised_blocking_with_shutdown(
-            self.running.clone(),
-            expensive_permit,
-            move |cancellation| {
-                let _mutation_guards = mutation_guards;
-                let source_metadata = fs_root.verify_opened_entry_sync(
-                    &source_path,
-                    &source_file,
-                    expected_source,
-                    MutationEndpointRole::Source,
-                )?;
-                let source_size = source_metadata.len();
-                if source_size > copy_limit {
-                    return Err(copy_size_error(copy_limit, Some(source_size)));
-                }
-                let current_size = fs_root
-                    .entry_size_nofollow(&worker_destination)?
-                    .unwrap_or(0);
-                run_storage_quota_hook(
-                    quota_hook.as_ref(),
-                    quota_hook_timeout,
-                    quota_user.as_deref(),
-                    "COPY",
-                    &worker_destination,
-                    current_size,
-                    source_size,
-                    &cancellation,
-                )?;
-
-                // 父解析和 O_EXCL 候选创建包含在工作线程生命周期内，不由可取消请求 future
-                // 执行，以免过早释放昂贵操作 permit。
-                // Parent resolution and O_EXCL creation belong to the worker lifetime, not a cancellable
-                // request future that could prematurely release the expensive permit.
-                let mut target =
-                    fs_root.create_blocking_temp(&worker_destination, false, upload_dir_mode)?;
-                if target.target_rel() != worker_destination {
-                    return Err(local_path_error(
-                        "COPY destination resolved to a different capability path",
-                    ));
-                }
-                if storage_space_check {
-                    enforce_storage_preflight(&target, source_size, storage_reserve)?;
-                }
-                let outcome = copy_regular_file_cooperatively(
-                    &mut source_file,
-                    target.file_mut(),
-                    Some(copy_limit),
-                    &cancellation,
-                )?;
-                if outcome.bytes > copy_limit {
-                    return Err(copy_size_error(copy_limit, Some(outcome.bytes)));
-                }
-                if outcome.bytes != source_size {
-                    return Err(anyhow::Error::new(FsError::changed(
-                        MutationEndpointRole::Source,
-                        source_path.display().to_string(),
-                        format!("{source_size} bytes"),
-                        format!("{} bytes copied", outcome.bytes),
-                    )));
-                }
-                fs_root.verify_opened_entry_sync(
-                    &source_path,
-                    &source_file,
-                    expected_source,
-                    MutationEndpointRole::Source,
-                )?;
-                target.commit(expected_destination, source_mode, &cancellation)?;
-                Ok(outcome)
-            },
-        );
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(self.args.copy_timeout);
-        let outcome = match operation.wait_until(deadline).await {
-            Ok(outcome) => outcome,
-            Err(err) => {
-                let endpoint_status = copy_move_changed_status(&err, changed_status, overwrite);
-                return map_local_mutation_error(
-                    "COPY",
-                    &destination,
-                    response_user.as_deref(),
-                    err,
-                    endpoint_status,
-                    res,
-                );
-            }
-        };
-        debug!(
-            "Completed local COPY: destination={destination:?} bytes={} strategy={:?}",
-            outcome.bytes, outcome.strategy
-        );
-
-        if dest_exists {
-            status_no_content(res);
-        } else {
-            *res.status_mut() = StatusCode::CREATED;
         }
         Ok(())
     }
@@ -1132,10 +659,10 @@ impl Server {
             return Ok(());
         }
 
-        // MOVE 与 COPY 有相同父集合要求。能力查找保持不创建，使缺失父目录报告 409 而非
+        // MOVE 要求目标父目录已经存在。能力查找保持不创建，使缺失父目录报告 409 而非
         // 悄然出现。
-        // MOVE has COPY's parent-collection requirement. Keep capability lookup non-creating so a
-        // missing parent is 409 rather than silently created.
+        // MOVE requires an existing destination parent. Keep capability lookup non-creating so a
+        // missing parent is 409 rather than silently creating it.
         if let Err(error) = self.fs_root.open_parent(dest, false).await {
             return map_required_parent_error("MOVE", dest, user, error, changed_status, res);
         }
@@ -1173,7 +700,7 @@ impl Server {
             )
             .await
         {
-            let endpoint_status = copy_move_changed_status(&error, changed_status, overwrite);
+            let endpoint_status = move_changed_status(&error, changed_status, overwrite);
             return map_local_mutation_error("MOVE", dest, user, error, endpoint_status, res);
         }
 
@@ -1185,11 +712,11 @@ impl Server {
         Ok(())
     }
 
-    /// 解析并校验 COPY/MOVE 的目标路径：
+    /// 解析并校验 MOVE 的目标路径：
     /// Destination 头 → 路径规范化（拒绝 `..`）→ 目标权限鉴权 → 拼绝对路径。
     /// 请求语义/权限失败把状态写进 `res` 并返回 `Ok(None)`；解析器或
     /// 文件系统基础设施失败保留 typed cause 向上传播。
-    /// Parse and validate COPY/MOVE destination: normalize the header path, reject `..`, authorize the
+    /// Parse and validate a MOVE destination: normalize the header path, reject `..`, authorize the
     /// target, and build its path. Semantic/permission failures write `res` and return `Ok(None)`;
     /// parser/filesystem failures preserve typed causes.
     pub(super) async fn prepare_destination(
@@ -1208,10 +735,10 @@ impl Server {
                 return Ok(None);
             }
         };
-        // 服务根在文件系统能力内没有父目录槽位，因此不能成为 COPY/MOVE 发布目标；在此拒绝，
+        // 服务根在文件系统能力内没有父目录槽位，因此不能成为 MOVE 发布目标；在此拒绝，
         // 避免 open_parent 把请求语义误报为内部错误。
         // The served root has no parent slot in the filesystem capability and therefore cannot be a
-        // COPY/MOVE publication destination. Reject it here instead of letting open_parent turn this
+        // MOVE publication destination. Reject it here instead of letting open_parent turn this
         // request semantic into an internal error.
         if dest_path.is_empty() {
             status_forbid(res);
@@ -1234,7 +761,7 @@ impl Server {
                 ) =>
             {
                 warn!(
-                    "Rejected COPY/MOVE Destination outside the filesystem capability: error={error:#}"
+                    "Rejected MOVE Destination outside the filesystem capability: error={error:#}"
                 );
                 ResponseError::bad_request(error).apply(res);
                 return Ok(None);
@@ -1270,11 +797,10 @@ impl Server {
         if destinations.next().is_some() {
             return None;
         }
-        // HTTP/2 通过 `:authority` 携带有效 authority；Hyper 不会为其合成 HTTP/1 `Host`。
-        // 回退到请求 URI 使同源 Destination 校验跨协议一致，避免把所有绝对 H2 COPY/MOVE
-        // 目标误判为畸形。
-        // HTTP/2 carries effective authority in `:authority`; Hyper does not synthesize `Host`.
-        // Falling back to the URI keeps same-origin checks identical across protocols.
+        // 对 absolute-form HTTP/1 请求，authority 位于请求 URI；普通 origin-form 请求则
+        // 使用 Host。两者同时存在时必须一致。
+        // Absolute-form HTTP/1 requests carry authority in the request URI; ordinary origin-form
+        // requests use Host. When both are present they must agree.
         let mut host_values = headers.get_all(HOST).iter();
         let header_host = match host_values.next() {
             Some(value) => Some(value.to_str().ok()?),
@@ -1300,22 +826,7 @@ impl Server {
     }
 }
 
-const LOCAL_COPY_CHUNK_SIZE: usize = 1024 * 1024;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum LocalCopyStrategy {
-    Reflink,
-    CopyFileRange,
-    Buffered,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct LocalCopyOutcome {
-    bytes: u64,
-    strategy: LocalCopyStrategy,
-}
-
-fn copy_move_changed_status(
+fn move_changed_status(
     error: &anyhow::Error,
     source_status: ChangedStatus,
     overwrite: bool,
@@ -1379,38 +890,6 @@ fn map_entry_expectation_error(
     map_local_mutation_error(operation, path, user, error, changed_status, res)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn map_existing_destination_error(
-    operation: &'static str,
-    path: &Path,
-    user: Option<&str>,
-    error: anyhow::Error,
-    overwrite: bool,
-    source_status: ChangedStatus,
-    res: &mut Response,
-) -> Result<()> {
-    let error = ensure_typed_filesystem_error("opening existing mutation destination", error);
-    let destination_missing = matches!(
-        FsError::in_anyhow_chain(&error),
-        Some(FsError::NotFound { .. })
-    );
-    let error = if destination_missing {
-        debug!(
-            "Mutation destination disappeared before validation: operation={operation} path={path:?} error={error:#}"
-        );
-        anyhow::Error::new(FsError::changed(
-            MutationEndpointRole::Destination,
-            path.display().to_string(),
-            "destination existed before shape validation",
-            "destination disappeared before shape validation",
-        ))
-    } else {
-        error
-    };
-    let changed_status = copy_move_changed_status(&error, source_status, overwrite);
-    map_local_mutation_error(operation, path, user, error, changed_status, res)
-}
-
 fn map_local_mutation_error(
     operation: &'static str,
     path: &Path,
@@ -1459,23 +938,6 @@ impl std::fmt::Display for StoragePreflightDenied {
 
 impl std::error::Error for StoragePreflightDenied {}
 
-#[derive(Debug)]
-struct StorageQuotaDenied {
-    status: Option<i32>,
-}
-
-impl std::fmt::Display for StorageQuotaDenied {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "storage quota hook denied the mutation: status={:?}",
-            self.status
-        )
-    }
-}
-
-impl std::error::Error for StorageQuotaDenied {}
-
 fn enforce_storage_preflight(
     temp: &super::filesystem::BlockingTempFile,
     final_size: u64,
@@ -1501,362 +963,8 @@ fn enforce_storage_preflight(
     Ok(())
 }
 
-pub(crate) const STORAGE_QUOTA_HOOK_HELPER_ARG: &str = "--internal-storage-quota-hook-exec";
-pub(crate) const STORAGE_QUOTA_HOOK_HELPER_FAILURE_EXIT_CODE: i32 = 125;
-
-/// 用 stdin 收到的钩子替换单线程内部辅助进程。服务器通过 `Stdio` 把重新打开且固定的描述符
-/// 映射到辅助进程 stdin，因此多线程服务器进程中绝不暴露可继承描述符。只有此辅助进程创建
-/// 一个非 CLOEXEC 副本，随后立即以固定 ELF/shebang 目标替换自身并恢复钩子的标准流策略。
-/// Replace the single-threaded helper with the hook received on stdin. The server maps a freshly
-/// reopened pinned descriptor through `Stdio`, exposing no inheritable descriptor in its multithreaded
-/// process. Only the helper creates one non-CLOEXEC duplicate before immediately execing the target.
-pub(crate) fn run_storage_quota_hook_helper(
-    args: impl IntoIterator<Item = OsString>,
-) -> Result<()> {
-    let mut args = args.into_iter();
-    let expected_parent = args
-        .next()
-        .and_then(|value| value.into_string().ok())
-        .and_then(|value| value.parse::<i32>().ok())
-        .and_then(rustix::process::Pid::from_raw)
-        .context("storage quota hook helper has an invalid expected parent pid")?;
-    // 中文：服务器若被 SIGKILL、测试失败或异常退出，钩子不能成为永久孤儿。
-    // 先设置父进程死亡信号，再核对父 PID，封闭父进程在 exec 与 prctl 之间退出的竞态。
-    // English: A hook must not become a permanent orphan when the server is
-    // SIGKILLed, a test fails, or the process exits unexpectedly. Arm the
-    // parent-death signal before checking the PID to close the exec/prctl race.
-    rustix::process::set_parent_process_death_signal(Some(rustix::process::Signal::KILL))
-        .context("failed to arm storage quota hook parent-death signal")?;
-    if rustix::process::getppid() != Some(expected_parent) {
-        bail!("storage quota hook parent exited before helper initialization");
-    }
-    let hook_fd = rustix::io::dup(std::io::stdin())
-        .context("failed to duplicate storage quota hook helper stdin")?;
-    if hook_fd.as_raw_fd() <= 2 {
-        bail!("storage quota hook helper failed to reserve a private descriptor");
-    }
-    let executable = PathBuf::from(format!("/proc/self/fd/{}", hook_fd.as_raw_fd()));
-    let mut command = Command::new(&executable);
-    command
-        .env_clear()
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    let error = command.exec();
-    Err(error).with_context(|| {
-        format!(
-            "failed to replace storage quota hook helper with `{}`",
-            executable.display()
-        )
-    })
-}
-
-fn storage_quota_hook_helper_command(args: &[OsString]) -> Command {
-    let mut command = Command::new("/proc/self/exe");
-    // 中间辅助进程不得短暂继承服务器配置秘密；它唯一的权限是 stdin 上固定钩子和下方显式
-    // 策略参数。
-    // The intermediate helper must not briefly inherit server configuration secrets. Its only authority
-    // is the pinned stdin hook plus explicit policy arguments below.
-    command.env_clear();
-    let expected_parent = OsString::from(std::process::id().to_string());
-    #[cfg(not(test))]
-    {
-        command
-            .arg(STORAGE_QUOTA_HOOK_HELPER_ARG)
-            .arg(&expected_parent)
-            .args(args);
-    }
-    #[cfg(test)]
-    {
-        // 单元测试进程是 libtest harness 而非 ram 二进制。进入一个确切辅助测试，再以仅子进程
-        // 环境变量携带的参数执行同一生产 exec 辅助路径。
-        // A unit-test process is libtest rather than ram. Enter one exact helper test, which exercises
-        // the same production exec helper using child-only environment variables.
-        command
-            .arg("--exact")
-            .arg("server::write::storage_tests::quota_hook_subprocess_helper")
-            .arg("--nocapture")
-            .env("RAM_QUOTA_HOOK_TEST_HELPER", "1")
-            .env(
-                "RAM_QUOTA_HOOK_TEST_ARG_COUNT",
-                (args.len() + 1).to_string(),
-            )
-            .env("RAM_QUOTA_HOOK_TEST_ARG_0", expected_parent);
-        for (index, value) in args.iter().enumerate() {
-            command.env(format!("RAM_QUOTA_HOOK_TEST_ARG_{}", index + 1), value);
-        }
-    }
-    command
-}
-
-fn quota_hook_infrastructure_error(
-    operation: &'static str,
-    source: impl Into<anyhow::Error>,
-) -> anyhow::Error {
-    anyhow::Error::new(FsError::io(operation, source))
-}
-
-fn quota_hook_policy_denial(
-    user: Option<&str>,
-    operation: &str,
-    path: &Path,
-    status: Option<i32>,
-) -> anyhow::Error {
-    warn!(
-        "Storage quota policy denied mutation: reason=quota_hook operation={operation} path={path:?} user={user:?} status={status:?}"
-    );
-    anyhow::Error::new(FsError::no_space(
-        "enforcing storage quota policy",
-        StorageQuotaDenied { status },
-    ))
-}
-
-/// 在同步写入 worker 中执行已固定的配额策略。钩子 fd 经 stdin 交给清空环境的内部 helper；
-/// helper 安装父进程死亡信号并从 `/proc/self/fd` exec，运行期间由独立进程组监督。
-/// exit 0 允许变更，helper 专用 125 表示 exec 基础设施失败，其他非零状态表示策略拒绝；取消或
-/// deadline 到期会杀死进程组并始终 wait 直系子进程。钩子不得 daemonize、double-fork 或
-/// `setsid` 逃离监督边界。
-/// Execute the pinned quota policy inside the synchronous write worker. The hook fd travels via stdin
-/// to a clean-environment helper, which arms a parent-death signal and execs `/proc/self/fd` under a
-/// separate process group. Exit 0 allows, helper-reserved 125 is infrastructure failure, and any other
-/// nonzero status is policy denial. Cancellation/deadline kills the group and always waits for the
-/// direct child; hooks must not daemonize, double-fork, or `setsid` out of supervision.
-#[allow(clippy::too_many_arguments)]
-fn run_storage_quota_hook(
-    hook: Option<&PathIdentity>,
-    timeout: Duration,
-    user: Option<&str>,
-    operation: &str,
-    path: &Path,
-    current_size: u64,
-    final_size: u64,
-    cancellation: &RequestCancellation,
-) -> Result<()> {
-    let Some(hook) = hook else {
-        return Ok(());
-    };
-    let Some(user) = user else {
-        return Err(quota_hook_policy_denial(None, operation, path, None));
-    };
-    let hook_file = hook.open_regular_file_pinned().map_err(|error| {
-        quota_hook_infrastructure_error("opening the pinned storage quota hook", error).context(
-            format!(
-                "failed to open pinned storage quota hook `{}`",
-                hook.canonical().display()
-            ),
-        )
-    })?;
-    let hook_args = [
-        OsString::from("--user"),
-        OsString::from(user),
-        OsString::from("--operation"),
-        OsString::from(operation),
-        OsString::from("--path"),
-        path.as_os_str().to_os_string(),
-        OsString::from("--current-bytes"),
-        OsString::from(current_size.to_string()),
-        OsString::from("--final-bytes"),
-        OsString::from(final_size.to_string()),
-    ];
-    let mut command = storage_quota_hook_helper_command(&hook_args);
-    command
-        .stdin(Stdio::from(hook_file))
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        // 隔离后代，使超时/取消可杀死整棵钩子进程树，而非遗留 shell 子进程。
-        // Isolate descendants so timeout/cancellation kills the whole hook tree instead of orphaning a
-        // shell child. Hooks must not daemonize or deliberately escape this process group.
-        .process_group(0);
-    let mut child = command.spawn().map_err(|error| {
-        quota_hook_infrastructure_error("starting the storage quota hook helper", error).context(
-            format!(
-                "failed to start helper for pinned storage quota hook `{}`",
-                hook.canonical().display(),
-            ),
-        )
-    })?;
-    let deadline = Instant::now() + timeout;
-    loop {
-        if cancellation.is_cancelled() {
-            terminate_quota_hook(&mut child);
-            return Err(anyhow::Error::new(AdmissionError::cancelled(
-                AdmissionResource::ExpensiveTasks,
-            ))
-            .context("request was cancelled while the storage quota hook was running"));
-        }
-        let status = child.try_wait().map_err(|error| {
-            quota_hook_infrastructure_error("waiting for the storage quota hook helper", error)
-        })?;
-        if let Some(status) = status {
-            return if status.success() {
-                Ok(())
-            } else if status.code() == Some(STORAGE_QUOTA_HOOK_HELPER_FAILURE_EXIT_CODE) {
-                Err(quota_hook_infrastructure_error(
-                    "executing the pinned storage quota hook",
-                    anyhow!(
-                        "storage quota hook helper failed before executing pinned hook `{}`",
-                        hook.canonical().display()
-                    ),
-                ))
-            } else {
-                Err(quota_hook_policy_denial(
-                    Some(user),
-                    operation,
-                    path,
-                    status.code(),
-                ))
-            };
-        }
-        if Instant::now() >= deadline {
-            terminate_quota_hook(&mut child);
-            return Err(anyhow::Error::new(AdmissionError::execution_timeout(
-                AdmissionResource::ExpensiveTasks,
-                timeout,
-            ))
-            .context("storage quota hook execution timed out"));
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
-
-/// 先向整个进程组发送 SIGKILL，以覆盖 shell/解释器后代；再对直系子进程执行 kill 回退并
-/// `wait`，同时处理组信号与启动之间的竞态并避免僵尸进程。
-/// Send SIGKILL to the process group first to cover shell/interpreter descendants, then kill the
-/// direct child as a startup-race fallback and always `wait` it to prevent zombies.
-fn terminate_quota_hook(child: &mut Child) {
-    if let Some(pid) = rustix::process::Pid::from_raw(child.id() as i32) {
-        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
-    }
-    // 对组信号与进程启动发生竞态的平台/文件系统保留直系子进程回退，随后始终回收子进程。
-    // Retain direct-child fallback where the group signal races startup, then always reap the child.
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
-fn copy_regular_file_cooperatively(
-    source: &mut File,
-    destination: &mut File,
-    max_bytes: Option<u64>,
-    cancellation: &RequestCancellation,
-) -> Result<LocalCopyOutcome> {
-    let source_metadata = source.metadata()?;
-    let destination_metadata = destination.metadata()?;
-    let same_filesystem = source_metadata.dev() == destination_metadata.dev();
-    let limit = max_bytes
-        .map(|value| value.saturating_add(1))
-        .unwrap_or(u64::MAX);
-
-    if same_filesystem {
-        #[cfg(not(any(target_arch = "sparc", target_arch = "sparc64")))]
-        loop {
-            if cancellation.is_cancelled() {
-                return Err(copy_cancellation_error(
-                    "request was cancelled before reflink",
-                ));
-            }
-            match rustix::fs::ioctl_ficlone(&*destination, &*source) {
-                Ok(()) => {
-                    if cancellation.is_cancelled() {
-                        return Err(copy_cancellation_error(
-                            "request was cancelled after reflink",
-                        ));
-                    }
-                    let bytes = destination.metadata()?.len();
-                    return Ok(LocalCopyOutcome {
-                        bytes,
-                        strategy: LocalCopyStrategy::Reflink,
-                    });
-                }
-                Err(rustix::io::Errno::INTR) => continue,
-                Err(err) if reflink_fallback_error(err) => {
-                    destination.set_len(0)?;
-                    source.seek(SeekFrom::Start(0))?;
-                    destination.seek(SeekFrom::Start(0))?;
-                    break;
-                }
-                Err(err) => return Err(err.into()),
-            }
-        }
-
-        let mut source_offset = 0u64;
-        let mut destination_offset = 0u64;
-        loop {
-            if cancellation.is_cancelled() {
-                return Err(copy_cancellation_error(
-                    "request was cancelled during copy_file_range",
-                ));
-            }
-            if destination_offset >= limit {
-                destination.set_len(destination_offset)?;
-                return Ok(LocalCopyOutcome {
-                    bytes: destination_offset,
-                    strategy: LocalCopyStrategy::CopyFileRange,
-                });
-            }
-            let chunk = (limit - destination_offset).min(LOCAL_COPY_CHUNK_SIZE as u64) as usize;
-            match rustix::fs::copy_file_range(
-                &*source,
-                Some(&mut source_offset),
-                &*destination,
-                Some(&mut destination_offset),
-                chunk,
-            ) {
-                Ok(0) => {
-                    destination.set_len(destination_offset)?;
-                    return Ok(LocalCopyOutcome {
-                        bytes: destination_offset,
-                        strategy: LocalCopyStrategy::CopyFileRange,
-                    });
-                }
-                Ok(_) => {}
-                Err(rustix::io::Errno::INTR) => continue,
-                Err(err) if copy_file_range_fallback_error(err, destination_offset == 0) => {
-                    source.seek(SeekFrom::Start(0))?;
-                    destination.set_len(0)?;
-                    destination.seek(SeekFrom::Start(0))?;
-                    break;
-                }
-                Err(err) => return Err(err.into()),
-            }
-        }
-    }
-
-    source.seek(SeekFrom::Start(0))?;
-    destination.set_len(0)?;
-    destination.seek(SeekFrom::Start(0))?;
-    let bytes = copy_buffered_bounded(source, destination, limit, cancellation)?;
-    Ok(LocalCopyOutcome {
-        bytes,
-        strategy: LocalCopyStrategy::Buffered,
-    })
-}
-
-fn copy_buffered_bounded(
-    source: &mut File,
-    destination: &mut File,
-    limit: u64,
-    cancellation: &RequestCancellation,
-) -> Result<u64> {
-    let mut buffer = vec![0u8; 64 * 1024];
-    let mut copied = 0u64;
-    while copied < limit {
-        if cancellation.is_cancelled() {
-            return Err(copy_cancellation_error(
-                "request was cancelled during buffered copy",
-            ));
-        }
-        let requested = (limit - copied).min(buffer.len() as u64) as usize;
-        let read = source.read(&mut buffer[..requested])?;
-        if read == 0 {
-            break;
-        }
-        destination.write_all(&buffer[..read])?;
-        copied = copied.saturating_add(read as u64);
-    }
-    Ok(copied)
-}
-
+/// 将已经记录长度的 PUT 暂存文件复制到目标父目录中的发布候选。
+/// Copy a recorded PUT staging file into a publication candidate in the target parent.
 fn copy_exact_at_current(
     source: &mut File,
     destination: &mut File,
@@ -1866,33 +974,32 @@ fn copy_exact_at_current(
     if source.metadata()?.len() != expected {
         bail!("staged upload length changed before local copy");
     }
-    let copied = copy_buffered_bounded(source, destination, expected, cancellation)?;
+    let mut buffer = vec![0u8; 64 * 1024];
+    let mut copied = 0u64;
+    while copied < expected {
+        if cancellation.is_cancelled() {
+            return Err(
+                anyhow::Error::new(AdmissionError::cancelled(AdmissionResource::Uploads))
+                    .context("request was cancelled during PUT fallback copy"),
+            );
+        }
+        let requested = (expected - copied).min(buffer.len() as u64) as usize;
+        let read = source.read(&mut buffer[..requested])?;
+        if read == 0 {
+            break;
+        }
+        destination.write_all(&buffer[..read])?;
+        copied = copied.saturating_add(read as u64);
+    }
     if copied != expected {
         bail!("staged upload ended before its recorded length");
     }
     Ok(())
 }
 
-fn reflink_fallback_error(error: rustix::io::Errno) -> bool {
-    matches!(
-        error,
-        rustix::io::Errno::XDEV
-            | rustix::io::Errno::OPNOTSUPP
-            | rustix::io::Errno::NOTTY
-            | rustix::io::Errno::INVAL
-    )
-}
-
-fn copy_file_range_fallback_error(error: rustix::io::Errno, zero_progress: bool) -> bool {
-    matches!(
-        error,
-        rustix::io::Errno::XDEV | rustix::io::Errno::OPNOTSUPP | rustix::io::Errno::NOSYS
-    ) || (zero_progress && error == rustix::io::Errno::INVAL)
-}
-
-/// 独立于请求/认证状态解析 WebDAV Destination。仅当绝对 URI 的有效 `host[:port]` 与请求
+/// 独立于请求/认证状态解析 MOVE Destination。仅当绝对 URI 的有效 `host[:port]` 与请求
 /// Host 匹配时才接受；相对路径不要求 Host。
-/// Parse WebDAV Destination independently of request/auth state. Absolute URIs require effective
+/// Parse a MOVE Destination independently of request/auth state. Absolute URIs require effective
 /// `host[:port]` to match request Host; relative paths need no Host.
 fn parse_destination_uri(destination: &str, request_host: Option<&str>) -> Option<String> {
     // Ram 只把 Destination 映射为一个文件系统路径，不提供 query/fragment 资源映射；
@@ -1959,8 +1066,8 @@ fn parse_destination_uri(destination: &str, request_host: Option<&str>) -> Optio
     Some(uri.path().to_string())
 }
 
-/// 联合配置 URI 前缀和请求路径能力规范器测试 WebDAV Destination/Host 同源检查。
-/// Exercise WebDAV Destination/Host same-origin checks with the configured URI prefix and request-path
+/// 联合配置 URI 前缀和请求路径能力规范器测试 MOVE Destination/Host 同源检查。
+/// Exercise MOVE Destination/Host same-origin checks with the configured URI prefix and request-path
 /// capability normalizer.
 #[cfg(feature = "fuzzing")]
 pub(crate) fn fuzz_destination_host_prefix(data: &[u8]) {
@@ -2032,13 +1139,10 @@ pub(crate) fn fuzz_destination_host_prefix(data: &[u8]) {
 }
 
 /// PUT 覆盖已有文件前评估条件写入头（`If-Match`、`If-None-Match: *`、
-/// `If-Unmodified-Since`）。
-/// 前置条件不满足时返回 `Ok(false)` 并把响应设为 412——
-/// 这正是编辑器"乐观并发控制"的实现：A、B 两人同时编辑，后保存的
-/// 那位带着旧 ETag，会被 412 拒绝而不是悄悄覆盖对方的修改。
+/// `If-Unmodified-Since`）。前置条件不满足时返回 `Ok(false)` 并把响应设为 412，
+/// 避免携带旧 ETag 的客户端悄悄覆盖已经变化的内容。
 /// Evaluate conditional-write headers before overwriting with PUT. Failure returns `Ok(false)` and
-/// 412, implementing optimistic concurrency: the later editor's stale ETag is rejected instead of
-/// silently overwriting another user's change.
+/// 412, so a client carrying a stale ETag cannot silently overwrite changed content.
 async fn write_cache_validators(
     opened: &mut OpenedNode,
     res: &mut Response,
@@ -2155,9 +1259,9 @@ pub(super) async fn write_precondition_passes(
     Ok(true)
 }
 
-/// COPY/MOVE 的 RFC 4918 `Overwrite` 头。缺省和精确的 `T` 允许覆盖，
+/// MOVE 的 RFC 4918 `Overwrite` 头。缺省和精确的 `T` 允许覆盖，
 /// 精确的 `F` 禁止覆盖；其他值（包括非 UTF-8）都是无效请求。
-/// RFC 4918 `Overwrite` for COPY/MOVE: absent or exact `T` permits replacement; exact `F` forbids it;
+/// RFC 4918 `Overwrite` for MOVE: absent or exact `T` permits replacement; exact `F` forbids it;
 /// every other value, including non-UTF-8, is invalid.
 fn overwrite_allowed(headers: &HeaderMap<HeaderValue>) -> Result<bool> {
     let mut values = headers.get_all("overwrite").iter();
@@ -2170,40 +1274,6 @@ fn overwrite_allowed(headers: &HeaderMap<HeaderValue>) -> Result<bool> {
         Some(b"F") => Ok(false),
         Some(_) => bail!("Invalid Overwrite header"),
     }
-}
-
-/// 解析 PATCH 的 `X-Update-Range` 头，得到写入偏移：
-/// `append` = 从当前文件末尾追加；`bytes=N-` 等 Range 语法 = 从 N 开始写。
-/// 没带该头返回 `Ok(None)`（路由层回 405）。
-/// Parse PATCH `X-Update-Range`: `append` starts at EOF and `bytes=N-` starts at N. Absence returns
-/// `Ok(None)` for the routing layer to map according to method semantics.
-pub(super) fn parse_upload_offset(
-    headers: &HeaderMap<HeaderValue>,
-    size: u64,
-) -> Result<Option<u64>> {
-    let mut values = headers.get_all("x-update-range").iter();
-    let Some(value) = values.next() else {
-        return Ok(None);
-    };
-    if values.next().is_some() {
-        bail!("Invalid X-Update-Range Header");
-    }
-    let err = || anyhow!("Invalid X-Update-Range Header");
-    let value = value.to_str().map_err(|_| err())?;
-    if value == "append" {
-        return Ok(Some(size));
-    }
-    // PATCH 只接受一个开放结尾字节偏移，而非完整 GET Range 语法。拒绝后缀、多重和闭合范围，
-    // 使提交偏移不依赖当前表示大小。
-    // PATCH accepts one open-ended byte offset, not full GET Range grammar. Rejecting suffix/multiple/
-    // closed ranges keeps commit offset independent of current representation size.
-    let offset = value
-        .strip_prefix("bytes=")
-        .and_then(|value| value.strip_suffix('-'))
-        .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
-        .and_then(|value| value.parse::<u64>().ok())
-        .ok_or_else(err)?;
-    Ok(Some(offset))
 }
 
 #[cfg(test)]

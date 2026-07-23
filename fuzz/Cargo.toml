@@ -34,13 +34,6 @@ doc = false
 bench = false
 
 [[bin]]
-name = "webdav_xml"
-path = "fuzz_targets/webdav_xml.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "destination_host_prefix"
 path = "fuzz_targets/destination_host_prefix.rs"
 test = false

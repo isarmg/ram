@@ -1,5 +1,4 @@
-//! 构造 HTTP 响应的小工具：常用状态码的快捷函数、WebDAV `multistatus`
-//! 信封、`Content-Disposition` 头的格式化。
+//! 构造 HTTP 响应的小工具：常用状态码与 `Content-Disposition` 头的格式化。
 //!
 //! ## 本模块的 Rust 知识点
 //! - **`&mut` 出参风格**：本项目的处理函数都接收 `res: &mut Response`
@@ -7,8 +6,7 @@
 //! - **HTTP 头注入防御**：文件名要过滤控制字符、转义引号后才能放进
 //!   `Content-Disposition`，否则携带 `\r\n` 的文件名可以伪造额外响应头。
 //!
-//! HTTP response helpers for common status codes, WebDAV `multistatus` envelopes, and
-//! `Content-Disposition` header formatting.
+//! HTTP response helpers for common status codes and `Content-Disposition` formatting.
 //!
 //! ## Rust concepts in this module
 //! - **`&mut` output style**: project handlers receive `res: &mut Response` and modify its status,
@@ -19,27 +17,11 @@
 
 use super::Response;
 use super::error::{HttpError, PublicErrorBody, ResponseError};
-use crate::http::body_full;
 use crate::utils::encode_uri;
 
 use anyhow::Result;
 use hyper::StatusCode;
 use hyper::header::{CONTENT_DISPOSITION, HeaderValue};
-
-/// 用 207 Multi-Status 包裹 WebDAV XML。 / Wrap WebDAV XML in a 207 Multi-Status response.
-pub(super) fn res_multistatus(res: &mut Response, content: &str) {
-    *res.status_mut() = StatusCode::MULTI_STATUS;
-    res.headers_mut().insert(
-        "content-type",
-        HeaderValue::from_static("application/xml; charset=utf-8"),
-    );
-    *res.body_mut() = body_full(format!(
-        r#"<?xml version="1.0" encoding="utf-8" ?>
-<D:multistatus xmlns:D="DAV:">
-{content}
-</D:multistatus>"#,
-    ));
-}
 
 /// 403 Forbidden：请求合法但权限不允许。 / The request is valid but authorization forbids it.
 pub(super) fn status_forbid(res: &mut Response) {

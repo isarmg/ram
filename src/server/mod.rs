@@ -4,19 +4,18 @@
 //! `call`/`handle` 分发、请求路径解析、以及符号链接越界防护。
 //! 具体的响应逻辑分散在各个职责单一的子模块里：
 //!
-//! - [`browse`]：目录列表、搜索、index 页渲染、404 页
-//! - [`content`]：文件下载（Range/条件请求）、编辑器、哈希、令牌、
+//! - [`browse`]：目录列表、搜索与 404 响应
+//! - [`content`]：文件下载（Range/条件请求）、只读查看器、
 //!   内置前端资源与健康检查端点
-//! - [`write`]：PUT/PATCH 上传、DELETE、MKCOL、COPY、MOVE
+//! - [`write`]：PUT 上传、DELETE、MKCOL、MOVE
 //! - [`archive`]：流式 `?zip` 打包下载
-//! - [`webdav`]：PROPFIND/PROPPATCH 与 WebDAV 能力声明
 //! - [`walk`]：带可见性策略的目录遍历（搜索/打包共用）
 //! - [`model`]/[`range`]/[`reply`]/[`security_headers`]：视图模型与
 //!   响应构建辅助
 //!
 //! ## 一次请求的生命周期（建议初学者顺着这条线读）
 //! 1. runtime 模块的 accept 循环收到连接，hyper 解析出请求后调用 [`Server::call`]；
-//! 2. `call` 负责"包外层"：记访问日志、兜住内部错误转成 500、补 CORS/安全头；
+//! 2. `call` 负责"包外层"：记访问日志、兜住内部错误转成 500、补安全头；
 //! 3. [`Server::handle`] 是真正的路由器：解析路径 → 认证鉴权 → 按
 //!    HTTP 方法和查询参数分发到各 `handle_*` 处理函数；
 //! 4. 处理函数把结果写进 `&mut Response`（状态码、响应头、响应体）。
@@ -27,8 +26,8 @@
 //!   无需加锁——"共享不可变数据"是 Rust 并发的第一选择。
 //! - **`async fn` 与 `.await`**：可能阻塞的文件系统工作会进入受控的
 //!   blocking worker；网络与可异步文件操作在等待时不占用执行线程。
-//! - **中央方法注册表**：标准 HTTP 与 WebDAV 方法都先解析为
-//!   `ResourceMethod`，能力、CORS、鉴权和路由共用同一份策略元数据。
+//! - **中央方法注册表**：支持的 HTTP 方法都先解析为
+//!   `ResourceMethod`，能力、鉴权和路由共用同一份策略元数据。
 //!
 //! ## English overview
 //! HTTP request routing and shared server state: the central module for the project.
@@ -37,12 +36,11 @@
 //! `call`/`handle` dispatch, request-path resolution, and symlink-containment enforcement. Focused
 //! submodules implement the concrete response behavior:
 //!
-//! - [`browse`]: directory listings, search, index-page rendering, and 404 pages;
-//! - [`content`]: file downloads with Range/conditional requests, the editor, hashes, tokens,
+//! - [`browse`]: directory listings, search, and 404 responses;
+//! - [`content`]: file downloads with Range/conditional requests, the read-only viewer,
 //!   embedded frontend assets, and the health-check endpoint;
-//! - [`write`]: PUT/PATCH uploads, DELETE, MKCOL, COPY, and MOVE;
+//! - [`write`]: PUT uploads, DELETE, MKCOL, and MOVE;
 //! - [`archive`]: streaming `?zip` downloads;
-//! - [`webdav`]: PROPFIND/PROPPATCH and WebDAV capability declarations;
 //! - [`walk`]: visibility-aware directory traversal shared by search and archive generation;
 //! - [`model`]/[`range`]/[`reply`]/[`security_headers`]: view models and response-building helpers.
 //!
@@ -50,7 +48,7 @@
 //! 1. The runtime module's accept loop receives a connection; once Hyper parses a request, it calls
 //!    [`Server::call`].
 //! 2. `call` supplies the outer shell: access logging, mapping internal errors to 500 responses, and
-//!    applying CORS/security headers.
+//!    applying security headers.
 //! 3. [`Server::handle`] is the actual router: it resolves the path, authenticates and authorizes the
 //!    caller, then dispatches to `handle_*` functions by HTTP method and query parameters.
 //! 4. A handler writes status, headers, and body into `&mut Response`.
@@ -61,15 +59,14 @@
 //!   concurrency pattern.
 //! - **`async fn` and `.await`**: potentially blocking filesystem work enters controlled blocking
 //!   workers; network and asynchronous file waits do not occupy an execution thread.
-//! - **Central method registry**: standard HTTP and WebDAV methods are first parsed as
-//!   `ResourceMethod`; capabilities, CORS, authorization, and routing share the same policy metadata.
+//! - **Central method registry**: supported HTTP methods are first parsed as `ResourceMethod`;
+//!   capabilities, authorization, and routing share the same policy metadata.
 
 mod archive;
 mod authentication;
 mod browse;
 mod capabilities;
 mod content;
-mod dav_routes;
 mod error;
 mod filesystem;
 mod model;
@@ -83,7 +80,6 @@ mod router;
 mod security_headers;
 mod state;
 mod walk;
-mod webdav;
 mod write;
 mod write_routes;
 
@@ -92,21 +88,18 @@ pub(crate) use archive::fuzz_zip_entry_name;
 #[cfg(feature = "fuzzing")]
 pub(crate) use preconditions::fuzz_range_if_range;
 #[cfg(feature = "fuzzing")]
-pub(crate) use webdav::fuzz_webdav_xml;
-#[cfg(feature = "fuzzing")]
 pub(crate) use write::fuzz_destination_host_prefix;
 
 use self::authentication::canonical_authorization_path_is_unavailable;
 #[cfg(test)]
 use self::authentication::canonicalize_authorization_path;
 use self::error::ChangedStatus;
-use self::model::DataKind;
 use self::mutation_version::{
     MutationActivityGuard, MutationVersionBeginError, MutationVersionState, MutationVersionToken,
 };
 use self::preconditions::{ParsedPreconditions, method_uses_preconditions};
 
-use self::capabilities::{CorsPreflightCapabilities, ResourceCapabilities, ResourceTarget};
+use self::capabilities::{ResourceCapabilities, ResourceTarget};
 
 use self::error::{
     AdmissionError, AdmissionResource, FsError, QueueScope, ResponseError, ResponseErrorRef,
@@ -118,25 +111,17 @@ use self::filesystem::{
 };
 use self::reply::{status_bad_request, status_forbid, status_not_found};
 use self::request_context::{NormalizedRequestPath, OpenedRequestTarget, RequestContext};
-use self::security_headers::{CorsRequest, add_cors, add_security_headers};
+use self::security_headers::add_security_headers;
 use self::walk::HiddenRules;
-use self::webdav::validate_mkcol_empty_body;
-pub(crate) use self::write::{
-    STORAGE_QUOTA_HOOK_HELPER_ARG, STORAGE_QUOTA_HOOK_HELPER_FAILURE_EXIT_CODE,
-    run_storage_quota_hook_helper,
-};
-use self::write::{
-    StagedUpload, UploadCommit, UploadProjection, parse_upload_offset, write_precondition_passes,
-};
-use crate::auth::{
-    AccessPaths, AuthDecision, AuthRequest, AuthSource, TokenRevokeError, www_authenticate,
-};
+use self::write::{StagedUpload, UploadCommit, write_precondition_passes};
+use self::write_routes::validate_mkcol_empty_body;
+use crate::auth::{AccessPaths, AuthDecision, AuthRequest, www_authenticate};
 use crate::config::Args;
 use crate::http::{
     ResourceMethod, ResourceRoute, ResponseBodyCompletion, ResponseBodyOutcome, body_full,
     body_with_completion_observer, body_with_request_permits,
 };
-use crate::identity::{PeerIdentity, SourceIdentity, TrustedProxyPolicy};
+use crate::identity::{PeerIdentity, SourceIdentity};
 use crate::logging::HttpLogger;
 use crate::utils::{decode_uri, encode_uri, get_file_name};
 
@@ -184,16 +169,10 @@ fn request_admission_rejection(error: AdmissionError) -> Response {
 /// 判断哪些 `RootFs::open` 失败属于合法的查找未命中。
 /// Determines which `RootFs::open` failures are legitimate lookup misses.
 ///
-/// 面向请求的探测会隐藏不可用名称，避免 ACL 和命名空间形状成为存在性预言机。可信内部
-/// 资源只将真正缺失视为可回退；权限、解析器和工作线程故障表示服务端资源能力损坏，返回
-/// 500。
-/// Request-facing probes hide unavailable names so ACL and namespace shape do not become an
-/// existence oracle. Trusted internal assets only treat a truly missing name as fallback-worthy;
-/// permission, resolver, and worker failures indicate a broken server-side capability and become 500.
+/// 面向请求的探测会隐藏不可用名称，避免 ACL 和命名空间形状成为存在性预言机。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum OpenErrorPolicy {
     HideUnavailable,
-    TrustedInternalAsset,
 }
 
 fn classify_open_result(
@@ -223,9 +202,6 @@ fn classify_open_result(
             );
     if is_hidden_miss {
         return Ok(None);
-    }
-    if policy == OpenErrorPolicy::TrustedInternalAsset {
-        return Err(anyhow::Error::new(FsError::io(operation, error)));
     }
     Err(error)
 }
@@ -288,12 +264,8 @@ fn observe_response_completion(
 
     let body = std::mem::replace(res.body_mut(), body_full(Bytes::new()));
     let body = if response_must_not_have_wire_body(res, request_method) {
-        // Hyper 的 HTTP/1 分发器会抑制 HEAD 负载字节，但 H2 会按协议无响应体语义校验 DATA
-        // 帧。在共享响应边界丢弃响应体，避免处理器 `head_only` 分支后生成的错误泄露响应体
-        // 或重置流。
-        // Hyper's HTTP/1 dispatcher suppresses HEAD bytes, while H2 validates DATA frames against
-        // bodyless semantics. Discard at the shared boundary so later errors cannot leak a body or
-        // reset the stream.
+        // 在共享响应边界丢弃 HEAD/无正文状态的响应体，避免处理器在 `head_only`
+        // 分支之后产生的错误正文泄露到网络。
         drop(body);
         body_full(Bytes::new())
     } else {
@@ -377,22 +349,15 @@ fn observe_response_completion(
 #[derive(Clone)]
 struct AuthenticatedUser(String);
 
-#[derive(Clone, Copy)]
-struct TokenAuthenticated;
-
 // `include_str!` 在**编译期**把前端页面模板嵌进二进制，
 // 所以发布单个可执行文件即可运行，无需附带资源目录。
 // `include_str!` embeds the frontend template at compile time, so one executable runs without an
 // accompanying asset directory.
 const INDEX_HTML: &str = include_str!("../../web/index.html");
+const EMBEDDED_ASSET_PREFIX: &str = concat!("__ram_v", env!("CARGO_PKG_VERSION"), "__/");
 /// 流式 IO 的统一块大小（文件下载、zip 管道、Range 下载共用）。
 /// Shared streaming-I/O chunk size for file downloads, ZIP pipes, and range responses.
 pub(crate) const BUF_SIZE: usize = 65536;
-/// 统计目录子条目数量时的上限（避免为超大目录数到天荒地老）。
-/// Maximum children counted in a directory, preventing unbounded scans of huge directories.
-const TOKENGEN_ALLOW: &str = "GET, POST";
-const TOKEN_REVOKE_ALLOW: &str = "POST";
-const CUSTOM_ASSET_INDEX_MAX_BYTES: usize = 1024 * 1024;
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) enum MutationLockMode {
     Read,
@@ -439,6 +404,7 @@ struct MutationIntent {
 }
 
 impl MutationIntent {
+    #[cfg(test)]
     fn read(path: impl Into<PathBuf>) -> Self {
         Self {
             path: path.into(),
@@ -560,10 +526,8 @@ impl RequestAdmission {
 
 struct CallResponseContext {
     request_method: Method,
-    cors_request: CorsRequest,
     http_log_data: HashMap<String, String>,
     request_started: Instant,
-    hsts_max_age: Option<u64>,
     skip_successful_asset: bool,
 }
 
@@ -764,7 +728,7 @@ mod mutation_lock_tests {
     }
 
     #[tokio::test]
-    async fn copy_source_reads_share_but_destination_write_excludes() -> Result<()> {
+    async fn shared_reads_allow_each_other_but_exclude_a_writer() -> Result<()> {
         let (directory, root) = capability_root(false)?;
         std::fs::write(directory.path().join("source"), b"data")?;
         let table = WriteLockTable::new();
@@ -791,7 +755,7 @@ mod mutation_lock_tests {
             )
             .await
             .err()
-            .expect("a writer bypassed active COPY readers");
+            .expect("a writer bypassed active readers");
         assert_lock_timeout(&writer_error);
         drop(second_reader);
         drop(first_reader);
@@ -944,43 +908,13 @@ mod keyed_limit_tests {
     }
 
     #[test]
-    fn distinct_unix_peer_credentials_have_independent_source_buckets() -> Result<()> {
+    fn distinct_remote_ips_have_independent_source_buckets() -> Result<()> {
         let limits = KeyedLimit::new(1);
-        let first = SourceIdentity::Unix {
-            uid: 1000,
-            gid: 100,
-            pid: 41,
-        };
-        let second = SourceIdentity::Unix {
-            uid: 1001,
-            gid: 100,
-            pid: 42,
-        };
+        let first = SourceIdentity::from("192.0.2.10".parse::<std::net::IpAddr>().unwrap());
+        let second = SourceIdentity::from("192.0.2.11".parse::<std::net::IpAddr>().unwrap());
         let _first_permit = limits.try_acquire(&first)?.unwrap();
         assert!(limits.try_acquire(&first)?.is_none());
         assert!(limits.try_acquire(&second)?.is_some());
-        Ok(())
-    }
-
-    #[test]
-    fn unix_process_churn_for_one_uid_shares_a_source_bucket() -> Result<()> {
-        let limits = KeyedLimit::new(1);
-        let first_process = SourceIdentity::Unix {
-            uid: 1000,
-            gid: 100,
-            pid: 41,
-        };
-        let forked_or_regrouped_process = SourceIdentity::Unix {
-            uid: 1000,
-            gid: 200,
-            pid: 9001,
-        };
-
-        let _permit = limits.try_acquire(&first_process)?.unwrap();
-        assert!(
-            limits.try_acquire(&forked_or_regrouped_process)?.is_none(),
-            "changing a Unix PID/GID bypassed the UID-scoped source limit"
-        );
         Ok(())
     }
 }
@@ -994,28 +928,10 @@ pub struct Server {
     /// 服务文件系统树固定的 Linux dirfd 能力。
     /// Pinned Linux dirfd capability for the served filesystem tree.
     fs_root: RootFs,
-    /// 自定义公开资源位于单独且拒绝符号链接的能力下。
-    /// Custom public assets live under a separate, symlink-denying capability.
-    assets_root: Option<RootFs>,
-    /// 内置前端资源的路径前缀（形如 `__ram_v<version>__/`，带版本号
-    /// 使升级后浏览器缓存自动失效）。
-    /// Built-in frontend asset prefix such as `__ram_v<version>__/`; the version invalidates browser
-    /// caches after an upgrade.
-    assets_prefix: String,
-    /// 内置资源的完整请求路径前缀（`{uri_prefix}{assets_prefix}`），
-    /// 用于替换进页面模板，也用于判断"该请求是资源请求，不记访问日志"。
-    /// Full request prefix for built-in assets (`{uri_prefix}{assets_prefix}`), inserted into the
-    /// page template and used to omit asset requests from routine access logs.
-    assets_uri: String,
-    /// 页面模板按 `__INDEX_DATA__` 占位符切成的前后两段，
-    /// `__ASSETS_PREFIX__` 已在启动时替换完毕；这样每次渲染页面
-    /// 只需一次字符串拼接，而不是对整个模板做两遍全文替换。
-    /// 模板里没有占位符时 `html_tail` 为 `None`，此时原样输出模板。
-    /// Page-template halves split around `__INDEX_DATA__`, with `__ASSETS_PREFIX__` already replaced
-    /// at startup. Each render needs one concatenation instead of two full scans. If the data marker
-    /// is absent, `html_tail` is `None` and the template is emitted unchanged.
+    /// 内嵌页面模板按 `__INDEX_DATA__` 占位符切成的前后两段。
+    /// Embedded page-template halves split around `__INDEX_DATA__`.
     html_head: String,
-    html_tail: Option<String>,
+    html_tail: String,
     /// 预编译的 `--hidden` 隐藏规则（见 walk.rs）。
     /// Precompiled `--hidden` visibility rules; see walk.rs.
     hidden: Arc<HiddenRules>,
@@ -1026,29 +942,24 @@ pub struct Server {
     /// 全局"仍在运行"标志；关停时置 false，长任务（搜索/打包）检查它提前退出。
     /// Process-wide running flag, cleared at shutdown and polled by long searches/archives.
     running: Arc<AtomicBool>,
-    /// 哈希、搜索、打包等高 IO/CPU 任务的独立并发闸门。
+    /// 搜索、目录列表和打包等高 IO/CPU 任务的独立并发闸门。
     /// 连接总上限只能防止连接数爆炸，不能防止少量已认证请求
     /// 同时扫描大目录/大文件。子模块在启动这些任务前获取 permit。
-    /// Separate concurrency gate for high-I/O/CPU hashing, search, and archive work. A connection cap
+    /// Separate concurrency gate for high-I/O/CPU search and archive work. A connection cap
     /// cannot stop a few authenticated requests scanning large trees/files; tasks acquire a permit.
     pub(super) expensive_task_limit: Arc<Semaphore>,
-    /// PUT/PATCH 候选在网络请求体到达时占用磁盘；该容量与 CPU 密集的搜索/打包准入分离。
-    /// PUT/PATCH candidates consume disk while their network bodies arrive. Keep that capacity
+    /// PUT 候选在网络请求体到达时占用磁盘；该容量与 CPU 密集的搜索/打包准入分离。
+    /// PUT candidates consume disk while their network bodies arrive. Keep that capacity
     /// separate from CPU-heavy search/archive admission.
     pub(super) upload_limit: Arc<Semaphore>,
-    /// 已认证身份和经验证传输来源各有独立子上限，避免单个账户或来源耗尽所有全局上传槽。
-    /// 来源就是认证、请求准入和访问日志共用的不可变 `SourceIdentity`：允许列表中的直连
-    /// 代理后严格解析出的客户端 IP、直连 TCP 对端，或内核提供的 Unix 对端凭据。
-    /// Authenticated identities and verified transport sources receive independent sub-limits so one
-    /// account/source cannot consume every upload slot. The immutable `SourceIdentity` is shared by
-    /// authentication, admission, and logging: a strictly parsed forwarded IP behind an allowlisted
-    /// direct proxy, the direct TCP peer, or kernel-supplied Unix peer credentials.
+    /// 已认证身份和内核提供的直连来源各有独立子上限，避免单个账户或来源耗尽所有上传槽。
+    /// Authenticated identities and direct transport sources receive independent sub-limits.
     upload_user_limit: KeyedLimit<Option<String>>,
     upload_source_limit: KeyedLimit<SourceIdentity>,
-    /// 每个 HTTP 请求的进程级准入控制。与 `runtime` 连接信号量不同，它也限制 HTTP/2 流。
+    /// 每个 HTTP 请求的进程级准入控制，与 `runtime` 的连接信号量互补。
     /// 所有权 permit 转移到响应体，使慢速下载一直计入统计直至 EOS 或客户端取消。
-    /// Process-wide admission for every HTTP request. Unlike the runtime connection semaphore, it
-    /// also bounds HTTP/2 streams. Its owned permit moves into the response body until EOS/cancel.
+    /// Process-wide admission for every HTTP request. Its owned permit moves into the response body
+    /// until EOS/cancel.
     request_limit: Arc<Semaphore>,
     /// 最多允许这么多请求等待进程级执行槽；获得执行 permit 后立即释放等待 permit。
     /// At most this many requests may wait for a process-wide execution slot. The waiting permit is
@@ -1061,11 +972,10 @@ pub struct Server {
     /// Authenticated-account admission is non-blocking and happens immediately after credential
     /// verification, before resource work starts.
     request_user_limit: KeyedLimit<String>,
-    trusted_proxy_policy: TrustedProxyPolicy,
-    /// 从权威状态观察到提交，串行化最终文件系统事务。PUT/PATCH 请求体在获取该锁前接收，
+    /// 从权威状态观察到提交，串行化最终文件系统事务。PUT 请求体在获取该锁前接收，
     /// 因此涓流客户端无法独占变更协调。
     /// Serialize final filesystem transactions from authoritative observation through commit.
-    /// PUT/PATCH bodies arrive before this lock, so a trickle client cannot monopolize coordination.
+    /// PUT bodies arrive before this lock, so a trickle client cannot monopolize coordination.
     write_locks: WriteLockTable,
     /// 进程唯一启动标识、单调变更 revision 与在途 worker 计数；用于保护目录页发起的
     /// DELETE/MOVE，且不被误当成持久文件系统版本。
@@ -1089,10 +999,10 @@ fn normalize_request_path(path: &str, path_prefix: &str) -> Option<String> {
             if v.contains('\0') {
                 return None;
             }
-            // 原子 PUT/COPY 在目标目录内使用保留的临时文件名。
+            // 原子 PUT 在目标目录内使用保留的临时文件名。
             // 这些候选在提交前绝不能被另一个 HTTP 请求列出、读取或
             // 修改；崩溃后遗留的候选同样保持不可访问。
-            // Atomic PUT/COPY uses reserved temporary names in the destination directory. Other HTTP
+            // Atomic PUT uses reserved temporary names in the destination directory. Other HTTP
             // requests must never list/read/change candidates before commit; crash remnants stay hidden.
             if is_internal_temp_name(v) {
                 return None;
@@ -1332,34 +1242,6 @@ mod open_error_policy_tests {
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
-    #[test]
-    fn trusted_internal_asset_permission_failure_is_internal_not_a_public_miss() {
-        let missing = classify_open_result(
-            raw_open_failure(io::ErrorKind::NotFound, "private missing asset"),
-            "opening a trusted internal asset",
-            OpenErrorPolicy::TrustedInternalAsset,
-        )
-        .expect("a genuinely absent optional asset permits fallback");
-        assert!(missing.is_none());
-
-        let error = match classify_open_result(
-            raw_open_failure(io::ErrorKind::PermissionDenied, "private asset permission"),
-            "opening a trusted internal asset",
-            OpenErrorPolicy::TrustedInternalAsset,
-        ) {
-            Err(error) => error,
-            Ok(_) => panic!("a broken trusted asset capability must be reported"),
-        };
-        assert!(format!("{error:#}").contains("private asset permission"));
-        assert!(matches!(
-            FsError::in_anyhow_chain(&error),
-            Some(FsError::Io { .. })
-        ));
-        let response = ResponseErrorRef::from_anyhow_typed(&error, ChangedStatus::Conflict)
-            .expect("trusted asset failures are typed");
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    }
-
     #[tokio::test]
     async fn canonical_authorization_only_falls_back_across_missing_components() -> Result<()> {
         let root = TempDir::new()?;
@@ -1558,16 +1440,10 @@ fn single_file_authorization_path(path: &Path) -> String {
         .unwrap_or_else(|| "__ram_single_file__".to_string())
 }
 
-fn status_method_not_allowed(res: &mut Response, allow: &'static str) {
-    *res.status_mut() = StatusCode::METHOD_NOT_ALLOWED;
-    res.headers_mut()
-        .insert(ALLOW, HeaderValue::from_static(allow));
-}
-
-/// OPTIONS 与每个资源的 405 都呈现同一组有效能力。刻意不发送数字 `DAV` 头：Ram 实现的
-/// 是有界且有文档说明的子集，而非 DAV class 1 的全部强制语义。
-/// OPTIONS and every resource 405 render the same effective capability set. There is deliberately
-/// no numeric `DAV` header: Ram implements a bounded documented subset, not all DAV class 1 semantics.
+/// OPTIONS 与每个资源的 405 都呈现同一组内部文件管理方法。明确移除 `DAV` 头，
+/// 避免浏览器接口被误识别为 WebDAV 服务。
+/// OPTIONS and every resource 405 render the same internal file-management methods. Remove any
+/// `DAV` header explicitly so the browser API cannot be mistaken for a WebDAV service.
 fn set_resource_headers(res: &mut Response, capabilities: ResourceCapabilities) {
     let allow = capabilities.allow_header();
     let value = HeaderValue::from_str(&allow)
@@ -1581,11 +1457,11 @@ fn status_resource_method_not_allowed(res: &mut Response, capabilities: Resource
     *res.status_mut() = StatusCode::METHOD_NOT_ALLOWED;
 }
 
-/// 不大于浏览器编辑器上限的文件获得内容派生的强验证器。这样可保证乐观编辑保存和小型
-/// If-Range 请求正确，又不强制每个数 GiB 下载二次完整读取。更大文件获得元数据派生的
+/// 不大于浏览器查看器上限的文件获得内容派生的强验证器。这样可保证小型 If-Range
+/// 请求正确，又不强制每个数 GiB 下载二次完整读取。更大文件获得元数据派生的
 /// *弱*验证器：时间戳/inode 元组可用于缓存重验证，但不能在所有文件系统证明逐字节相同。
-/// Files no larger than the browser editor limit receive a content-derived strong validator. This
-/// keeps optimistic saves and small If-Range requests correct without rereading every huge download.
+/// Files no larger than the browser viewer limit receive a content-derived strong validator. This
+/// keeps small If-Range requests correct without rereading every huge download.
 /// Larger files get a metadata-derived *weak* validator useful for revalidation, not byte identity.
 const STRONG_ETAG_MAX_SIZE: u64 = 4 * 1024 * 1024;
 

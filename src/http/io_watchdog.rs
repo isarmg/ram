@@ -3,8 +3,8 @@
 //! 更新空闲 deadline 并解除写停滞。任一 deadline 到期后，所有后续 I/O 都永久返回
 //! `TimedOut`。
 //!
-//! 这是两层策略中的传输层：同一 HTTP/2 连接上任意流成功写入都算 socket 进度；每个非空
-//! 响应还由 `http::body` 的响应局部 watchdog 独立约束，因此其他流活跃不能掩盖单流停滞。
+//! 这是两层策略中的传输层：socket 成功写入算作连接进度；每个非空响应还由
+//! `http::body` 的响应局部 watchdog 独立约束正文生成进度。
 //! handler 活跃时仅暂停连接空闲到期，不暂停已经 pending 的写、响应局部 deadline 或外层
 //! 最大连接寿命。
 //!
@@ -22,12 +22,10 @@
 //! deadline expires, the wrapper is terminal and every later I/O operation
 //! returns [`io::ErrorKind::TimedOut`].
 //!
-//! This wrapper is the transport half of a two-layer policy. It deliberately
-//! observes one socket rather than individual HTTP/2 streams, so any stream's
-//! successful write is transport progress. Each non-empty response is also
-//! wrapped by the response-local monitor in `http::body`; that monitor has an
-//! independent deadline and closes the Hyper connection if its own stream
-//! stops producing output, even while another H2 stream remains active.
+//! This wrapper is the transport half of a two-layer policy. It observes socket
+//! progress, while each non-empty response is also wrapped by the response-local
+//! monitor in `http::body`. That monitor has an independent deadline and closes
+//! the Hyper connection if the body stops producing output.
 //! Connection idle expiry is suspended while a request handler is actively
 //! consuming a body or doing local work, but pending writes, response-local
 //! deadlines, and maximum lifetime are not.

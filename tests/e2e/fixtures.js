@@ -68,7 +68,5 @@ export async function removeE2eData() {
     throw new Error(`Refusing to remove unexpected E2E path: ${resolved}`);
   }
   await rm(resolved, { recursive: true, force: true });
-  await rm(`${resolved}.token-revocations.json`, { force: true });
-  await rm(`${resolved}.token-revocations.json.lock`, { force: true });
   delete process.env[DATA_ENV];
 }

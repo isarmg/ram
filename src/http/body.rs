@@ -243,7 +243,7 @@ where
         let mut this = self.project();
         let polled = this.inner.as_mut().poll_frame(cx);
         if let Poll::Ready(result) = &polled {
-            // 中文：inner 声称某帧为最后一帧时不能释放，Hyper 仍可能在 socket/H2 流控后持有它；
+            // 中文：inner 声称某帧为最后一帧时不能释放，Hyper 仍可能在 socket 背压后持有它；
             // Body 边界只以 None、错误或 Drop 为生命周期终点。
             // English: Do not release on a claimed last frame while Hyper may
             // retain it behind flow control; only None, error, or Drop is terminal here.
@@ -493,10 +493,10 @@ where
 
 /// 响应局部输出进度 watchdog。 / Response-local output progress watchdog.
 ///
-/// HTTP/2 流控耗尽后 Hyper 可停止轮询该正文，poll_frame 内计时器不会触发，其他流写入也会掩盖停滞；
-/// 此包装器用独立任务按本响应帧刷新 deadline，超时通知连接驱动终止 Hyper future。
-/// An independent task enforces per-response progress even when H2 flow control
-/// stops body polling and other streams keep the connection active.
+/// socket 背压后 Hyper 可能暂停轮询正文，因此 `poll_frame` 内的计时器无法可靠触发；
+/// 此包装器用独立任务按响应帧刷新 deadline，超时后通知连接驱动终止 Hyper future。
+/// An independent task enforces per-response progress even when socket backpressure stops body
+/// polling.
 struct ResponseWriteIdleBody {
     inner: BoxBody<Bytes, anyhow::Error>,
     progress: Option<watch::Sender<u64>>,

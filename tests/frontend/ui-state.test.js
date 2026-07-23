@@ -1,7 +1,12 @@
 import { expect, test } from "vitest";
-import { parseIndexData } from "../../web/ui-state.js";
+import { directoryQueryParams, parseIndexData } from "../../web/ui-state.js";
 
-test("index data is normalized with editor capabilities disabled", () => {
+test("generated directory links retain only browsing query state", () => {
+  expect(directoryQueryParams("?q=report&sort=size&order=desc&token=secret&edit=true"))
+    .toEqual({ q: "report", sort: "size", order: "desc" });
+});
+
+test("index data is normalized independently from the read-only viewer", () => {
   const data = parseIndexData({
     href: "/",
     kind: "Index",
@@ -19,26 +24,22 @@ test("index data is normalized with editor capabilities disabled", () => {
   });
   expect(data.kind).toBe("Index");
   expect(data.paths).toHaveLength(1);
-  expect(data.can_save).toBe(false);
+  expect(data.text_viewable).toBe(false);
   expect(data.mutation_version).toBe("00000000-0000-0000-0000-000000000001.9");
 });
 
-test("editor data is normalized without inventing directory permissions", () => {
+test("viewer data is normalized without inventing directory permissions", () => {
   const data = parseIndexData({
     href: "/a",
-    kind: "Edit",
+    kind: "View",
     uri_prefix: "/",
-    allow_upload: true,
-    allow_delete: true,
-    can_save: true,
-    can_delete: true,
-    can_move: true,
     user: null,
-    editable: true,
+    text_viewable: true,
   });
   expect(data.user).toBe("");
   expect(data.allow_search).toBe(false);
   expect(data.paths).toEqual([]);
+  expect(data.text_viewable).toBe(true);
   expect(data.mutation_version).toBeNull();
 });
 
@@ -140,15 +141,10 @@ test("index mutation versions are required, canonical, and bounded to u64", () =
 test("embedded navigation roots are normalized path-only URLs", () => {
   const base = {
     href: "/file.txt",
-    kind: "Edit",
+    kind: "View",
     uri_prefix: "/ram/",
-    allow_upload: true,
-    allow_delete: true,
-    can_save: true,
-    can_delete: true,
-    can_move: true,
     user: "admin",
-    editable: true,
+    text_viewable: true,
   };
   expect(parseIndexData(base).uri_prefix).toBe("/ram/");
   const scriptScheme = ["java", "script:alert(1)"].join("");

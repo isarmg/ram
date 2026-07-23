@@ -1,12 +1,12 @@
 //! 分层路径授权与 HTTP 方法权限策略。权限只从最近的非 IndexOnly 祖先继承；
-//! 写方法（含 COPY/MOVE 目标）要求 ReadWrite；遍历入口只能暴露明确可读的后代。
+//! 写方法（含 MOVE 目标）要求 ReadWrite；遍历入口只能暴露明确可读的后代。
 //!
 //! Hierarchical path authorization and HTTP-method permission policy.
 //!
 //! Security invariants:
 //! - path permissions inherit only from the nearest non-index-only ancestor;
 //! - write-capable methods require read-write permission, including a separate
-//!   destination check for COPY and MOVE;
+//!   destination check for MOVE;
 //! - traversal roots never expose an index-only subtree outside explicitly
 //!   readable descendants.
 
@@ -99,9 +99,8 @@ impl AccessPaths {
     }
 
     /// 与 `guard` 类似，但无论 HTTP 方法一律要求读写权限。
-    /// 用于 COPY/MOVE 的 `Destination`：那个路径总是被写入的，
-    /// 即使 COPY 方法对其*源*路径而言是只读的。
-    /// Require ReadWrite regardless of method, for COPY/MOVE destinations even when the source is read-only.
+    /// MOVE 的 `Destination` 总是被写入，因此使用此入口。
+    /// Require ReadWrite regardless of method for a MOVE destination.
     pub fn guard_write(&self, path: &str) -> Option<Self> {
         let target = self.find(path)?;
         if !target.perm().readwrite() {

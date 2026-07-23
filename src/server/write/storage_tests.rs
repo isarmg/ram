@@ -43,51 +43,11 @@ fn destination_accepts_only_relative_or_same_host_http_family_uris() {
 }
 
 #[test]
-fn quota_hook_subprocess_helper() {
-    if std::env::var_os("RAM_QUOTA_HOOK_TEST_HELPER").is_none() {
-        return;
-    }
-    let count = std::env::var("RAM_QUOTA_HOOK_TEST_ARG_COUNT")
-        .unwrap()
-        .parse::<usize>()
-        .unwrap();
-    let args = (0..count)
-        .map(|index| {
-            std::env::var_os(format!("RAM_QUOTA_HOOK_TEST_ARG_{index}"))
-                .expect("quota-hook helper argument is missing")
-        })
-        .collect::<Vec<_>>();
-    if run_storage_quota_hook_helper(args).is_err() {
-        std::process::exit(STORAGE_QUOTA_HOOK_HELPER_FAILURE_EXIT_CODE);
-    }
-}
-
-#[test]
-fn projected_upload_size_covers_limit_boundaries_for_put_and_patch() {
-    for (incoming, expected) in [(7, Ok(7)), (8, Ok(8)), (9, Err(UploadSizeExceeded))] {
-        assert_eq!(projected_upload_size(99, None, incoming, 8), expected);
-    }
-
-    for (incoming, expected) in [(2, Ok(7)), (3, Ok(8)), (4, Err(UploadSizeExceeded))] {
-        assert_eq!(projected_upload_size(5, Some(5), incoming, 8), expected);
-    }
-    assert_eq!(projected_upload_size(8, Some(8), 0, 8), Ok(8));
-    assert_eq!(
-        projected_upload_size(9, Some(9), 0, 8),
-        Err(UploadSizeExceeded)
-    );
-}
-
-#[test]
-fn projected_upload_size_rejects_overflow_even_when_unlimited() {
-    assert_eq!(
-        projected_upload_size(0, Some(u64::MAX), 1, 0),
-        Err(UploadSizeExceeded)
-    );
-    assert_eq!(
-        projected_upload_size(u64::MAX, Some(u64::MAX - 1), 1, 0),
-        Ok(u64::MAX)
-    );
+fn upload_size_limit_covers_boundaries() {
+    assert!(upload_size_allowed(7, 8));
+    assert!(upload_size_allowed(8, 8));
+    assert!(!upload_size_allowed(9, 8));
+    assert!(!upload_size_allowed(1, 0));
 }
 
 #[test]
@@ -142,31 +102,6 @@ fn staging_fallback_accepts_only_a_typed_missing_parent() {
     ));
 }
 
-#[test]
-fn quota_hook_infrastructure_is_500_but_policy_denial_is_507() {
-    let infrastructure = quota_hook_infrastructure_error(
-        "opening quota hook",
-        io::Error::from(io::ErrorKind::PermissionDenied),
-    );
-    assert!(matches!(
-        FsError::in_anyhow_chain(&infrastructure),
-        Some(FsError::Io { .. })
-    ));
-    let infrastructure =
-        ResponseErrorRef::from_anyhow_typed(&infrastructure, ChangedStatus::Conflict)
-            .expect("quota infrastructure error is typed");
-    assert_eq!(infrastructure.status(), StatusCode::INTERNAL_SERVER_ERROR);
-
-    let denial = quota_hook_policy_denial(Some("alice"), "COPY", Path::new("dest.bin"), Some(23));
-    assert!(matches!(
-        FsError::in_anyhow_chain(&denial),
-        Some(FsError::NoSpace { .. })
-    ));
-    let denial = ResponseErrorRef::from_anyhow_typed(&denial, ChangedStatus::Conflict)
-        .expect("quota policy denial is typed");
-    assert_eq!(denial.status(), StatusCode::INSUFFICIENT_STORAGE);
-}
-
 #[tokio::test]
 async fn validator_truncation_maps_to_changed_precondition_412() {
     let dir = TempDir::new().unwrap();
@@ -188,22 +123,54 @@ async fn validator_truncation_maps_to_changed_precondition_412() {
     assert_eq!(response.status(), StatusCode::PRECONDITION_FAILED);
 }
 
-fn open_pair(source: &Path, destination: &Path) -> (File, File) {
-    let source = OpenOptions::new().read(true).open(source).unwrap();
-    let destination = OpenOptions::new()
+#[test]
+fn put_fallback_copy_preserves_recorded_content() {
+    let dir = TempDir::new().unwrap();
+    let source_path = dir.path().join("source");
+    let destination_path = dir.path().join("destination");
+    std::fs::write(&source_path, b"abcdef").unwrap();
+    let mut source = OpenOptions::new().read(true).open(&source_path).unwrap();
+    let mut destination = OpenOptions::new()
         .create_new(true)
         .read(true)
         .write(true)
-        .open(destination)
+        .open(&destination_path)
         .unwrap();
-    (source, destination)
+
+    copy_exact_at_current(
+        &mut source,
+        &mut destination,
+        6,
+        &RequestCancellation::new(),
+    )
+    .unwrap();
+    assert_eq!(std::fs::read(destination_path).unwrap(), b"abcdef");
 }
 
-fn executable_script(dir: &TempDir, body: &str) -> PathBuf {
-    let path = dir.path().join("quota-hook.sh");
-    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
-    path
+#[test]
+fn put_fallback_copy_observes_preexisting_cancellation() {
+    let dir = TempDir::new().unwrap();
+    let source_path = dir.path().join("source");
+    let destination_path = dir.path().join("destination");
+    std::fs::write(&source_path, b"abcdef").unwrap();
+    let mut source = OpenOptions::new().read(true).open(&source_path).unwrap();
+    let mut destination = OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .open(destination_path)
+        .unwrap();
+    let cancellation = RequestCancellation::new();
+    cancellation.cancel();
+
+    let error = copy_exact_at_current(&mut source, &mut destination, 6, &cancellation).unwrap_err();
+    assert!(matches!(
+        AdmissionError::in_anyhow_chain(&error),
+        Some(AdmissionError::Cancelled {
+            resource: AdmissionResource::Uploads,
+        })
+    ));
+    assert_eq!(destination.metadata().unwrap().len(), 0);
 }
 
 #[test]
@@ -236,289 +203,10 @@ fn actual_dev_full_enospc_is_classified_when_available() {
 }
 
 #[test]
-fn copy_acceleration_keeps_safe_fallback_boundaries() {
-    for errno in [
-        rustix::io::Errno::XDEV,
-        rustix::io::Errno::OPNOTSUPP,
-        rustix::io::Errno::NOTTY,
-        rustix::io::Errno::INVAL,
-    ] {
-        assert!(reflink_fallback_error(errno));
-    }
-    for errno in [
-        rustix::io::Errno::NOSPC,
-        rustix::io::Errno::DQUOT,
-        rustix::io::Errno::IO,
-    ] {
-        assert!(!reflink_fallback_error(errno));
-        assert!(!copy_file_range_fallback_error(errno, true));
-    }
-    assert!(copy_file_range_fallback_error(
-        rustix::io::Errno::INVAL,
-        true
-    ));
-    assert!(!copy_file_range_fallback_error(
-        rustix::io::Errno::INVAL,
-        false
-    ));
-}
-
-#[test]
-fn cooperative_copy_preserves_content_and_reports_policy_overrun() {
-    let dir = TempDir::new().unwrap();
-    let source_path = dir.path().join("source");
-    std::fs::write(&source_path, b"abcdef").unwrap();
-
-    let (mut source, mut destination) = open_pair(&source_path, &dir.path().join("copy"));
-    let outcome = copy_regular_file_cooperatively(
-        &mut source,
-        &mut destination,
-        None,
-        &RequestCancellation::new(),
-    )
-    .unwrap();
-    assert_eq!(outcome.bytes, 6);
-    assert_eq!(std::fs::read(dir.path().join("copy")).unwrap(), b"abcdef");
-
-    let (mut source, mut destination) = open_pair(&source_path, &dir.path().join("limited-copy"));
-    let outcome = copy_regular_file_cooperatively(
-        &mut source,
-        &mut destination,
-        Some(3),
-        &RequestCancellation::new(),
-    )
-    .unwrap();
-    assert!(
-        outcome.bytes > 3,
-        "caller must observe limit + 1/full reflink"
-    );
-}
-
-#[test]
-fn cooperative_copy_observes_preexisting_cancellation() {
-    let dir = TempDir::new().unwrap();
-    let source_path = dir.path().join("source");
-    std::fs::write(&source_path, b"abcdef").unwrap();
-    let (mut source, mut destination) = open_pair(&source_path, &dir.path().join("cancelled-copy"));
-    let cancellation = RequestCancellation::new();
-    cancellation.cancel();
-    let error = copy_regular_file_cooperatively(&mut source, &mut destination, None, &cancellation)
-        .unwrap_err();
-    assert!(matches!(
-        AdmissionError::in_anyhow_chain(&error),
-        Some(AdmissionError::Cancelled {
-            resource: AdmissionResource::CopyBytes,
-        })
-    ));
-    let response = ResponseErrorRef::from_anyhow_typed(&error, ChangedStatus::Conflict)
-        .expect("copy cancellation remains typed under context");
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(destination.metadata().unwrap().len(), 0);
-}
-
-#[test]
-fn quota_hook_receives_identity_and_sizes_and_denies_fail_closed() {
-    let dir = TempDir::new().unwrap();
-    let allow_path = executable_script(
-        &dir,
-        r#"test "$1" = "--user" && test "$2" = "alice" &&
-test "$3" = "--operation" && test "$4" = "COPY" &&
-test "$5" = "--path" && test "$6" = "dest.bin" &&
-test "$7" = "--current-bytes" && test "$8" = "12" &&
-test "$9" = "--final-bytes" && test "${10}" = "34""#,
-    );
-    let allow = PathIdentity::capture(&allow_path).unwrap();
-    run_storage_quota_hook(
-        Some(&allow),
-        Duration::from_secs(1),
-        Some("alice"),
-        "COPY",
-        Path::new("dest.bin"),
-        12,
-        34,
-        &RequestCancellation::new(),
-    )
-    .unwrap();
-
-    let deny_path = executable_script(&dir, "exit 17");
-    let deny = PathIdentity::capture(&deny_path).unwrap();
-    let error = run_storage_quota_hook(
-        Some(&deny),
-        Duration::from_secs(1),
-        Some("alice"),
-        "COPY",
-        Path::new("dest.bin"),
-        0,
-        1,
-        &RequestCancellation::new(),
-    )
-    .unwrap_err();
-    assert!(matches!(
-        FsError::in_anyhow_chain(&error),
-        Some(FsError::NoSpace { .. })
-    ));
-
-    let error = run_storage_quota_hook(
-        Some(&allow),
-        Duration::from_secs(1),
-        None,
-        "COPY",
-        Path::new("dest.bin"),
-        0,
-        1,
-        &RequestCancellation::new(),
-    )
-    .unwrap_err();
-    assert!(matches!(
-        FsError::in_anyhow_chain(&error),
-        Some(FsError::NoSpace { .. })
-    ));
-}
-
-#[test]
-fn quota_hook_timeout_kills_descendants_and_is_distinct_from_quota_denial() {
-    let dir = TempDir::new().unwrap();
-    let child_pid = dir.path().join("child.pid");
-    let hook_path = executable_script(
-        &dir,
-        &format!(
-            r#"
-/bin/sleep 30 &
-echo $! > "{}"
-wait"#,
-            child_pid.display()
-        ),
-    );
-    let hook = PathIdentity::capture(&hook_path).unwrap();
-    let error = run_storage_quota_hook(
-        Some(&hook),
-        Duration::from_millis(200),
-        Some("alice"),
-        "PATCH",
-        Path::new("dest.bin"),
-        1,
-        2,
-        &RequestCancellation::new(),
-    )
-    .unwrap_err();
-    assert!(matches!(
-        AdmissionError::in_anyhow_chain(&error),
-        Some(AdmissionError::Timeout {
-            kind: super::super::error::AdmissionTimeoutKind::Execution,
-            ..
-        })
-    ));
-    assert!(FsError::in_anyhow_chain(&error).is_none());
-
-    let pid: u32 = std::fs::read_to_string(&child_pid)
-        .expect("quota hook did not start its descendant")
-        .trim()
-        .parse()
-        .unwrap();
-    let descendant_is_running = || {
-        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
-            return false;
-        };
-        stat.rsplit_once(") ")
-            .is_some_and(|(_, fields)| !fields.starts_with("Z "))
-    };
-    let deadline = Instant::now() + Duration::from_secs(1);
-    while descendant_is_running() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    assert!(
-        !descendant_is_running(),
-        "quota-hook timeout left descendant pid {pid} running"
-    );
-}
-
-#[test]
-fn quota_hook_executes_pinned_shebang_after_parent_namespace_replacement() {
-    let dir = TempDir::new().unwrap();
-    let trusted_parent = dir.path().join("trusted");
-    std::fs::create_dir(&trusted_parent).unwrap();
-    let marker = dir.path().join("marker");
-    let trusted_hook = trusted_parent.join("quota-hook.sh");
-    std::fs::write(
-        &trusted_hook,
-        format!("#!/bin/sh\nprintf trusted > \"{}\"\n", marker.display()),
-    )
-    .unwrap();
-    std::fs::set_permissions(&trusted_hook, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let identity = PathIdentity::capture(&trusted_hook).unwrap();
-
-    let moved_parent = dir.path().join("trusted-before-replacement");
-    std::fs::rename(&trusted_parent, &moved_parent).unwrap();
-    std::fs::create_dir(&trusted_parent).unwrap();
-    let decoy_hook = trusted_parent.join("quota-hook.sh");
-    std::fs::write(
-        &decoy_hook,
-        format!(
-            "#!/bin/sh\nprintf decoy > \"{}\"\nexit 23\n",
-            marker.display()
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&decoy_hook, std::fs::Permissions::from_mode(0o700)).unwrap();
-
-    run_storage_quota_hook(
-        Some(&identity),
-        Duration::from_secs(1),
-        Some("alice"),
-        "PUT",
-        Path::new("dest.bin"),
-        0,
-        1,
-        &RequestCancellation::new(),
-    )
-    .unwrap();
-    assert_eq!(std::fs::read_to_string(marker).unwrap(), "trusted");
-}
-
-#[test]
-fn quota_hook_helper_exec_failure_is_not_a_policy_denial() {
-    let dir = TempDir::new().unwrap();
-    let invalid_hook = dir.path().join("invalid-hook");
-    std::fs::write(
-        &invalid_hook,
-        b"#!/definitely/missing/ram-quota-hook-interpreter\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&invalid_hook, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let identity = PathIdentity::capture(&invalid_hook).unwrap();
-
-    let error = run_storage_quota_hook(
-        Some(&identity),
-        // cargo-llvm-cov 下辅助进程是插桩 libtest 可执行文件；即使无效 shebang 立即失败，
-        // 进程启动和 profile 刷新也可能超过一秒。此分类测试应独立于工具开销。
-        // Under cargo-llvm-cov the helper is instrumented libtest; startup/profile flushing may
-        // exceed one second although invalid shebang fails immediately. Keep classification independent.
-        Duration::from_secs(10),
-        Some("alice"),
-        "PUT",
-        Path::new("dest.bin"),
-        0,
-        1,
-        &RequestCancellation::new(),
-    )
-    .unwrap_err();
-    assert!(!matches!(
-        FsError::in_anyhow_chain(&error),
-        Some(FsError::NoSpace { .. })
-    ));
-    assert!(
-        error
-            .to_string()
-            .contains("failed before executing pinned hook"),
-        "unexpected quota-hook infrastructure error: {error:#}"
-    );
-}
-
-#[test]
 fn storage_denials_map_to_507_but_internal_errors_do_not() {
     let mut response = Response::default();
     map_local_mutation_error(
-        "COPY",
+        "PUT",
         Path::new("dest.bin"),
         Some("alice"),
         anyhow::Error::new(io::Error::from_raw_os_error(
@@ -532,7 +220,7 @@ fn storage_denials_map_to_507_but_internal_errors_do_not() {
 
     let mut response = Response::default();
     map_local_mutation_error(
-        "COPY",
+        "PUT",
         Path::new("dest.bin"),
         Some("alice"),
         anyhow!("internal invariant failed"),
@@ -544,7 +232,7 @@ fn storage_denials_map_to_507_but_internal_errors_do_not() {
 }
 
 #[test]
-fn raced_endpoint_roles_select_412_or_409_without_path_inference() {
+fn move_raced_endpoint_roles_select_412_or_409_without_path_inference() {
     let cases = [
         (
             MutationEndpointRole::Source,
@@ -573,10 +261,10 @@ fn raced_endpoint_roles_select_412_or_409_without_path_inference() {
     ];
     for (role, source_status, overwrite, expected_status) in cases {
         let error = anyhow::Error::new(FsError::changed(role, "diagnostic/path", "A", "B"));
-        let changed_status = copy_move_changed_status(&error, source_status, overwrite);
+        let changed_status = move_changed_status(&error, source_status, overwrite);
         let mut response = Response::default();
         map_local_mutation_error(
-            "COPY/MOVE",
+            "MOVE",
             Path::new("unrelated/display/path"),
             Some("alice"),
             error,

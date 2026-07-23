@@ -40,29 +40,24 @@ test("directory UI records moderate issues and blocks serious violations", async
   expect(serious).toEqual([]);
 });
 
-test("editor controls follow the refreshed path ACL", async ({ baseURL, browser }) => {
+test("viewer stays read-only for both read-only and read-write paths", async ({ baseURL, browser }) => {
   const context = await browser.newContext({
     baseURL,
     httpCredentials: { username: "reader", password: "reader", send: "always" },
   });
   const page = await context.newPage();
   try {
-    await page.goto("/hello.txt?edit");
-    await expect(page.locator(".save-btn")).toBeHidden();
-    await expect(page.locator(".move-file")).toBeHidden();
-    await expect(page.locator(".delete-file")).toBeHidden();
-    await expect(page.locator("#editor")).toHaveAttribute("readonly", "");
+    await page.goto("/hello.txt?view");
+    await expect(page.locator(".text-viewer"))
+      .toContainText("Hello from the browser integration fixture.");
+    await expect(page.locator("#editor")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: /Save|Move|Delete/ })).toHaveCount(0);
     expect((await context.request.put("/hello.txt", { data: "forbidden" })).status()).toBe(403);
 
-    // 中文：同一账号对 /dir1 有 rw；新页面必须使用该资源的有效 ACL，不能保留上一页的
-    // 全局功能开关或能力状态。
-    // English: The account has rw on /dir1. A fresh page must use that
-    // resource's effective ACL rather than retaining prior-page capability state.
-    await page.goto("/dir1/hello.txt?edit");
-    await expect(page.locator(".save-btn")).toBeVisible();
-    await expect(page.locator(".move-file")).toBeVisible();
-    await expect(page.locator(".delete-file")).toBeVisible();
-    await expect(page.locator("#editor")).not.toHaveAttribute("readonly", "");
+    await page.goto("/dir1/hello.txt?view");
+    await expect(page.locator(".text-viewer")).toBeVisible();
+    await expect(page.locator("#editor")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: /Save|Move|Delete/ })).toHaveCount(0);
   } finally {
     await context.close();
   }

@@ -1,13 +1,5 @@
-//! 可移植原子替换元数据验收框架。
-//! Portable atomic-replacement metadata acceptance harness.
-//!
-//! 普通测试运行覆盖当前临时文件系统；CI 可在显式 ext4/XFS 挂载上运行相同用例而无需改代码：
-//! The ordinary run exercises the current temporary filesystem. CI can run identical cases on ext4
-//! and XFS mounts without changing test code:
-//!
-//! `TMPDIR=/mounted/ext4 RAM_METADATA_EXPECT_FS=ext2/ext3 cargo test --test metadata`
-//!
-//! `TMPDIR=/mounted/xfs RAM_METADATA_EXPECT_FS=xfs cargo test --test metadata`
+//! 原子替换的可移植元数据验收测试。
+//! Portable metadata acceptance tests for atomic replacement.
 
 #[path = "common/fixtures.rs"]
 mod fixtures;
@@ -42,37 +34,22 @@ struct AclEntry {
     id: u32,
 }
 
-fn filesystem_matrix_label(path: &Path) -> Result<String, Error> {
-    let output = match Command::new("stat")
+fn assert_expected_filesystem(path: &Path) -> Result<(), Error> {
+    let Ok(expected) = std::env::var("RAM_METADATA_EXPECT_FS") else {
+        return Ok(());
+    };
+    let output = Command::new("stat")
         .args(["-f", "-c", "%T"])
         .arg(path)
-        .output()
-    {
-        Ok(output) if output.status.success() => output,
-        Ok(output) => {
-            eprintln!(
-                "SKIP ext4/xfs matrix label: stat failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-            return Ok("unknown".to_string());
-        }
-        Err(error) => {
-            eprintln!("SKIP ext4/xfs matrix label: stat is unavailable: {error}");
-            return Ok("unknown".to_string());
-        }
-    };
-    let actual = String::from_utf8(output.stdout)?.trim().to_string();
-    if let Ok(expected) = std::env::var("RAM_METADATA_EXPECT_FS") {
-        assert_eq!(
-            actual, expected,
-            "metadata acceptance ran on an unexpected filesystem"
-        );
-    } else if !matches!(actual.as_str(), "ext2/ext3" | "ext2/ext3/ext4" | "xfs") {
-        eprintln!(
-            "SKIP ext4/xfs-specific matrix assertion on {actual}; the portable metadata policy assertions still ran. Set RAM_METADATA_EXPECT_FS in ext4/xfs CI jobs."
-        );
+        .output()?;
+    if !output.status.success() {
+        return Err("stat failed while checking the metadata test filesystem".into());
     }
-    Ok(actual)
+    let actual = String::from_utf8(output.stdout)?.trim().to_owned();
+    if actual != expected {
+        return Err(format!("metadata acceptance ran on `{actual}`, expected `{expected}`").into());
+    }
+    Ok(())
 }
 
 fn acl_entry(tag: u16, permissions: u16, id: u32) -> AclEntry {
@@ -191,7 +168,7 @@ fn replacement_uses_new_inode_metadata_and_drops_unapproved_metadata(
     ])]
     server: TestServer,
 ) -> Result<(), Error> {
-    let fs_type = filesystem_matrix_label(server.path())?;
+    assert_expected_filesystem(server.path())?;
     let target = server.path().join("metadata-policy.bin");
     let alias = server.path().join("metadata-policy-hardlink.bin");
     std::fs::write(&target, b"old representation")?;
@@ -285,7 +262,6 @@ fn replacement_uses_new_inode_metadata_and_drops_unapproved_metadata(
             "replacement copied an old inode ACL entry: {acl:?}"
         );
     }
-    eprintln!("metadata replacement policy verified on filesystem type {fs_type}");
     Ok(())
 }
 
@@ -298,7 +274,7 @@ fn new_inode_inherits_parent_default_acl_then_applies_configured_mode(
     ])]
     server: TestServer,
 ) -> Result<(), Error> {
-    let fs_type = filesystem_matrix_label(server.path())?;
+    assert_expected_filesystem(server.path())?;
     let euid = rustix::process::geteuid().as_raw();
     let acl_uid = if euid == 65_534 { 65_533 } else { 65_534 };
     if !set_raw_acl(
@@ -335,6 +311,5 @@ fn new_inode_inherits_parent_default_acl_then_applies_configured_mode(
         }),
         "fchmod did not reconcile the inherited ACL mask with mode 0640: {acl:?}"
     );
-    eprintln!("default ACL inheritance verified on filesystem type {fs_type}");
     Ok(())
 }

@@ -1,4 +1,4 @@
-//! 视图/序列化数据类型：目录列表、编辑器页面、WebDAV `PROPFIND` 响应
+//! 视图/序列化数据类型：目录列表和只读查看页面
 //! 所用的"纯数据"结构。它们只负责承载数据和格式化输出，
 //! 不依赖请求处理器的任何状态——这是"数据与逻辑分离"的典型做法。
 //!
@@ -10,8 +10,8 @@
 //! - **枚举建模**：文件系统条目只有四种形态（目录/符号链接目录/文件/符号
 //!   链接文件），用枚举穷举，`match` 时编译器会强制处理所有情况。
 //!
-//! View/serialization data types: state-free structures used by directory listings, editor pages,
-//! and WebDAV `PROPFIND` responses. They carry and format data without depending on handler state,
+//! View/serialization data types: state-free structures used by directory listings and read-only
+//! viewer pages. They carry and format data without depending on handler state,
 //! which is the usual separation of data from logic.
 //!
 //! ## Rust concepts in this module
@@ -31,8 +31,6 @@ use std::cmp::Ordering;
 pub enum DataKind {
     /// 目录列表页。 / Directory listing page.
     Index,
-    /// 文件编辑页。 / File editor page.
-    Edit,
     /// 文件只读查看页。 / Read-only file viewer page.
     View,
 }
@@ -83,11 +81,6 @@ pub struct PathItem {
 impl PathItem {
     pub fn is_dir(&self) -> bool {
         self.path_type == PathType::Dir || self.path_type == PathType::SymlinkDir
-    }
-
-    /// 取 `name` 最后一段。 / Return the final segment of `name` (`a/b/c.txt` → `c.txt`).
-    pub fn base_name(&self) -> &str {
-        self.name.split('/').next_back().unwrap_or_default()
     }
 
     /// 按修改时间排序，目录始终在前。 / Sort by modification time with directories first.
@@ -162,21 +155,13 @@ impl PartialOrd for PathType {
     }
 }
 
-/// 以 base64(JSON) 嵌入 HTML 的编辑器/查看器数据。 / Editor/viewer data embedded as base64(JSON).
+/// 以 base64(JSON) 嵌入 HTML 的只读查看器数据。 / Read-only viewer data embedded as base64(JSON).
 #[derive(Debug, Serialize)]
-pub(crate) struct EditData {
+pub(crate) struct ViewData {
     pub(crate) href: String,
     pub(crate) kind: DataKind,
     pub(crate) uri_prefix: String,
-    /// 此已打开对象的有效能力，合并全局功能开关与已认证 ACL；浏览器不能只凭全局开关推断写权限。
-    /// Effective capabilities combine process gates and ACL. The compatibility
-    /// `allow_*` aliases carry these effective, never merely global, values.
-    pub(crate) allow_upload: bool,
-    pub(crate) allow_delete: bool,
-    pub(crate) can_save: bool,
-    pub(crate) can_delete: bool,
-    pub(crate) can_move: bool,
     pub(crate) user: Option<String>,
-    /// 是否可编辑（≤ 4 MiB 且判定为文本）。 / Whether the file is editable (≤ 4 MiB and classified as text).
-    pub(crate) editable: bool,
+    /// 是否可作为有界文本加载。 / Whether the file may be loaded as bounded text.
+    pub(crate) text_viewable: bool,
 }

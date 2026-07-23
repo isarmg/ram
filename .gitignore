@@ -2,11 +2,6 @@
 /node_modules
 /coverage
 /dist
-/verified-source
-/smoke-diagnostics
-/ram-fileserver-*.cdx.json
-/release-metadata/*
-!/release-metadata/README.md
 /*.profraw
 __pycache__/
 *.py[cod]
@@ -14,5 +9,3 @@ __pycache__/
 /config.yaml
 /*.local.yaml
 /.env
-/.ram-token-revocations.json
-/.ram-token-revocations.json.lock

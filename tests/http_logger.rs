@@ -16,7 +16,6 @@ use rstest::rstest;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::os::unix::fs::{PermissionsExt, chown, symlink};
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -66,17 +65,12 @@ fn log_remote_user(
 fn log_redacts_token(tmpdir: TempDir, port: u16) -> Result<(), Error> {
     let server = spawn_server(&tmpdir, port, &["--log-format", "$request"]);
 
-    let tokengen_url = format!("http://localhost:{port}/index.html?tokengen");
-    let resp = fetch!(b"GET", &tokengen_url)
-        .basic_auth(TEST_AUTH_USER, Some(TEST_AUTH_PASS))
-        .send()?;
-    assert_eq!(resp.status(), 200);
-    let token = resp.text()?;
-
-    let token_url = format!("http://localhost:{port}/index.html?token={token}");
+    // 查询串凭据有意不受支持，但客户端仍可能误发一个 `token=` 参数；日志必须脱敏其值。
+    // Query-string credentials are deliberately unsupported, but a client may accidentally send a
+    // `token=` parameter; its value must be redacted in the log.
+    let secret = "s3cr3t-download-value";
+    let token_url = format!("http://localhost:{port}/index.html?token={secret}");
     let resp = fetch!(b"GET", &token_url).send()?;
-    // 查询串凭据有意不受支持，但客户端仍可能误发；必须拒绝并脱敏。
-    // Query-string credentials are deliberately unsupported, but an accidental one must be rejected and redacted.
     assert_eq!(resp.status(), 401);
     let _ = resp.bytes()?;
 
@@ -86,7 +80,7 @@ fn log_redacts_token(tmpdir: TempDir, port: u16) -> Result<(), Error> {
         server
             .stdout_lines()
             .iter()
-            .all(|line| !line.contains(&token)),
+            .all(|line| !line.contains(secret)),
         "token leaked into log"
     );
     Ok(())
@@ -100,16 +94,10 @@ fn log_redacts_token(tmpdir: TempDir, port: u16) -> Result<(), Error> {
 fn log_redacts_percent_encoded_token_key(tmpdir: TempDir, port: u16) -> Result<(), Error> {
     let server = spawn_server(&tmpdir, port, &["--log-format", "$request"]);
 
-    let tokengen_url = format!("http://localhost:{port}/index.html?tokengen");
-    let resp = fetch!(b"GET", &tokengen_url)
-        .basic_auth(TEST_AUTH_USER, Some(TEST_AUTH_PASS))
-        .send()?;
-    assert_eq!(resp.status(), 200);
-    let token = resp.text()?;
-
+    let secret = "s3cr3t-download-value";
     // `%74` 解码为 `t`，日志器仍必须识别该键。
     // `%74` decodes to `t`, so the logger must still recognize the key.
-    let token_url = format!("http://localhost:{port}/index.html?%74oken={token}");
+    let token_url = format!("http://localhost:{port}/index.html?%74oken={secret}");
     let resp = fetch!(b"GET", &token_url).send()?;
     assert_eq!(resp.status(), 401);
     let _ = resp.bytes()?;
@@ -120,7 +108,7 @@ fn log_redacts_percent_encoded_token_key(tmpdir: TempDir, port: u16) -> Result<(
         server
             .stdout_lines()
             .iter()
-            .all(|line| !line.contains(&token)),
+            .all(|line| !line.contains(secret)),
         "token leaked into log: {:?}",
         server.stdout_lines()
     );
@@ -206,7 +194,6 @@ fn invalid_credentials_never_become_the_logged_remote_user(
 #[case("$http_proxy_authorization")]
 #[case("$http_cookie")]
 #[case("$http_set_cookie")]
-#[case("$http_x_ram_revoke_token")]
 #[case("$http_x_api_key")]
 #[case("$http_x_auth_token")]
 #[case("$http_x_client_secret")]
@@ -351,142 +338,5 @@ fn dropped_file_download_is_logged_as_downstream_cancelled(
     assert_eq!(fields[1], "downstream_cancelled", "{line}");
     assert_eq!(fields[3], "1", "{line}");
     assert!(fields[2].parse::<usize>()? < LARGE_FILE_BYTES, "{line}");
-    Ok(())
-}
-
-#[rstest]
-fn newly_created_log_file_is_private(tmpdir: TempDir, port: u16) -> Result<(), Error> {
-    let logdir = TempDir::new()?;
-    let log_path = logdir.path().join("access.log");
-    let server = spawn_server(
-        &tmpdir,
-        port,
-        &[
-            "--log-format",
-            "$request",
-            "--log-file",
-            log_path.to_str().unwrap(),
-        ],
-    );
-    let resp = fetch!(b"GET", format!("http://localhost:{port}/"))
-        .basic_auth(TEST_AUTH_USER, Some(TEST_AUTH_PASS))
-        .send()?;
-    assert_eq!(resp.status(), 200);
-    let _ = resp.bytes()?;
-    drop(server);
-
-    let mode = fs::metadata(log_path)?.permissions().mode() & 0o777;
-    assert_eq!(mode, 0o600);
-    Ok(())
-}
-
-#[rstest]
-fn existing_log_file_permissions_are_restricted(tmpdir: TempDir, port: u16) -> Result<(), Error> {
-    let logdir = TempDir::new()?;
-    let log_path = logdir.path().join("access.log");
-    fs::write(&log_path, b"existing\n")?;
-    let mut permissions = fs::metadata(&log_path)?.permissions();
-    permissions.set_mode(0o644);
-    fs::set_permissions(&log_path, permissions)?;
-
-    let server = spawn_server(
-        &tmpdir,
-        port,
-        &[
-            "--log-format",
-            "$request",
-            "--log-file",
-            log_path.to_str().unwrap(),
-        ],
-    );
-    let resp = fetch!(b"GET", format!("http://localhost:{port}/"))
-        .basic_auth(TEST_AUTH_USER, Some(TEST_AUTH_PASS))
-        .send()?;
-    assert_eq!(resp.status(), 200);
-    let _ = resp.bytes()?;
-    drop(server);
-
-    assert_eq!(fs::metadata(log_path)?.permissions().mode() & 0o777, 0o600);
-    Ok(())
-}
-
-#[rstest]
-fn log_file_with_untrusted_owner_is_rejected(tmpdir: TempDir, port: u16) -> Result<(), Error> {
-    if !rustix::process::geteuid().is_root() {
-        return Ok(());
-    }
-    let logdir = TempDir::new()?;
-    let log_path = logdir.path().join("access.log");
-    fs::write(&log_path, b"must-not-be-modified")?;
-    chown(&log_path, Some(65_534), None)?;
-
-    let mut cmd = ram_command(tmpdir.path(), port);
-    cmd.args(["--auth", TEST_AUTH_RULE, "--log-file"])
-        .arg(&log_path);
-    cmd.assert()
-        .failure()
-        .stderr(predicates::str::contains("Log file"))
-        .stderr(predicates::str::contains("untrusted owner"));
-    assert_eq!(fs::read(log_path)?, b"must-not-be-modified");
-    Ok(())
-}
-
-#[rstest]
-fn log_file_symlink_is_rejected(tmpdir: TempDir, port: u16) -> Result<(), Error> {
-    let logdir = TempDir::new()?;
-    let target = logdir.path().join("target.log");
-    fs::write(&target, b"must-not-be-overwritten")?;
-    let link = logdir.path().join("access.log");
-    symlink(&target, &link)?;
-
-    let mut cmd = ram_command(tmpdir.path(), port);
-    cmd.args([
-        "--auth",
-        TEST_AUTH_RULE,
-        "--log-file",
-        link.to_str().unwrap(),
-    ]);
-    cmd.assert().failure();
-    assert_eq!(fs::read(target)?, b"must-not-be-overwritten");
-    Ok(())
-}
-
-#[rstest]
-fn hard_linked_log_file_is_rejected(tmpdir: TempDir, port: u16) -> Result<(), Error> {
-    let logdir = TempDir::new()?;
-    let target = logdir.path().join("target.log");
-    fs::write(&target, b"must-not-be-modified")?;
-    let alias = logdir.path().join("access.log");
-    fs::hard_link(&target, &alias)?;
-
-    let mut cmd = ram_command(tmpdir.path(), port);
-    cmd.args([
-        "--auth",
-        TEST_AUTH_RULE,
-        "--log-file",
-        alias.to_str().unwrap(),
-    ]);
-    cmd.assert()
-        .failure()
-        .stderr(predicates::str::contains("hard-link aliases"));
-    assert_eq!(fs::read(target)?, b"must-not-be-modified");
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-#[rstest]
-fn non_regular_log_target_is_rejected(tmpdir: TempDir, port: u16) -> Result<(), Error> {
-    let mut cmd = ram_command(tmpdir.path(), port);
-    cmd.args([
-        "--auth",
-        TEST_AUTH_RULE,
-        "--log-format",
-        "$request",
-        "--log-file",
-        "/dev/full",
-    ]);
-    cmd.assert()
-        .failure()
-        .stderr(predicates::str::contains("regular file"));
     Ok(())
 }

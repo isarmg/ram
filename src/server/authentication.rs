@@ -144,12 +144,12 @@ impl Server {
     /// - 记录访问日志（成功与失败都记）；
     /// - 把 `handle` 返回的内部错误兜住，转成 500 响应——所以这个函数
     ///   自身永远返回 `Ok`，连接不会因业务错误而断开；
-    /// - 统一补上 CORS 头和安全响应头。
+    /// - 统一补上安全响应头。
     ///
     /// 注意接收者写法 `self: Arc<Self>`：调用方传入的是 Arc 智能指针
     /// 本身（而非 `&self` 借用），因为异步任务需要拥有状态的所有权。
     /// Per-request outer middleware records terminal access logs, maps internal
-    /// errors to bounded responses, and applies CORS/security headers. Arc ownership supports async task lifetime.
+    /// errors to bounded responses, and applies security headers. Arc ownership supports async task lifetime.
     pub async fn call(
         self: Arc<Self>,
         req: Request,
@@ -158,29 +158,19 @@ impl Server {
         let request_started = Instant::now();
         let uri = req.uri().clone();
         let request_method = req.method().clone();
-        let hsts_max_age = self.args.hsts_max_age;
-        let cors_request = CorsRequest::from_headers(req.headers());
         let mut http_log_data = self.args.http_logger.data(&req);
         http_log_data.insert(
             "request_id".to_string(),
             Uuid::new_v4().simple().to_string(),
         );
-        let direct_source = peer.direct_source();
-        let (source, forwarding_error) =
-            match self.trusted_proxy_policy.resolve(&peer, req.headers()) {
-                Ok(source) => (source, None),
-                Err(error) => (direct_source, Some(error.to_string())),
-            };
-        // 中文：日志使用与所有按键预算相同的已验证身份，绝不复制转发头原始字节。
-        // English: Logging uses the same verified identity as keyed budgets; forwarding-header bytes are never copied.
+        let source = peer.direct_source();
+        // 日志和所有按来源预算只使用监听器从内核取得的直连身份。
         http_log_data.insert("remote_addr".to_string(), source.to_string());
-        let skip_successful_asset = uri.path().starts_with(&self.assets_uri);
+        let skip_successful_asset = self.is_embedded_asset_request(uri.path());
         let mut response_context = CallResponseContext {
             request_method,
-            cors_request,
             http_log_data,
             request_started,
-            hsts_max_age,
             skip_successful_asset,
         };
         let mut admission = RequestAdmission::default();
@@ -266,14 +256,6 @@ impl Server {
             }
         }
 
-        // 中文：可信代理的畸形转发头在收到有界 400 前仍计入内核来源桶和全局请求预算。
-        // English: Malformed trusted-proxy forwarding data is charged to kernel-source and global budgets before bounded 400.
-        if let Some(error) = forwarding_error {
-            let mut res = Response::default();
-            status_bad_request(&mut res, "Invalid forwarding header");
-            return Ok(self.finish_call_response(res, Some(error), admission, response_context));
-        }
-
         let (res, handler_error) = match self.clone().handle(req, source, &mut admission).await {
             Ok(res) => {
                 if let Some(user) = res.extensions().get::<AuthenticatedUser>() {
@@ -301,10 +283,7 @@ impl Server {
         admission: RequestAdmission,
         context: CallResponseContext,
     ) -> Response {
-        if res.extensions().get::<TokenAuthenticated>().is_some() {
-            res.headers_mut()
-                .typed_insert(CacheControl::new().with_private().with_no_store());
-        } else if res.extensions().get::<AuthenticatedUser>().is_some()
+        if res.extensions().get::<AuthenticatedUser>().is_some()
             && !res.headers().contains_key("cache-control")
         {
             // 中文：认证下载只允许用户私有缓存且必须 revalidate；敏感动态/API handler 自行设更严 private,no-store。
@@ -313,13 +292,7 @@ impl Server {
                 .typed_insert(CacheControl::new().with_private().with_no_cache());
         }
 
-        add_cors(
-            &mut res,
-            &context.request_method,
-            &context.cors_request,
-            &self.args,
-        );
-        add_security_headers(&mut res, context.hsts_max_age);
+        add_security_headers(&mut res);
         observe_response_completion(
             &mut res,
             &context.request_method,

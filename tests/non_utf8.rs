@@ -1,8 +1,8 @@
 //! 非有效 UTF-8 的 Linux 文件名的黑盒契约。
 //! Black-box contract for Linux filenames that are not valid UTF-8.
 //!
-//! HTTP URL、JSON、HTML、搜索结果和 DAV XML 刻意不创造有损别名；ZIP 是唯一无损导出表示。
-//! HTTP URLs, JSON, HTML, search results, and DAV XML do not invent a lossy alias. ZIP is the sole lossless export.
+//! HTTP URL、JSON、HTML 和搜索结果刻意不创造有损别名；ZIP 是唯一无损导出表示。
+//! HTTP URLs, JSON, HTML, and search results do not invent a lossy alias. ZIP is the sole lossless export.
 
 #[path = "common/fixtures.rs"]
 mod fixtures;
@@ -16,7 +16,6 @@ use std::ffi::OsStr;
 use std::io::{Cursor, Read};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::symlink;
-use xml::reader::EventReader;
 
 fn path_names(value: &Value) -> Vec<&str> {
     value["paths"]
@@ -108,24 +107,6 @@ fn non_utf8_names_have_an_observable_fail_closed_contract(
     let alias = reqwest::blocking::get(format!("{}raw-alias", server.url()))?;
     assert_eq!(alias.status(), 404);
 
-    // Depth: 1 DAV 复用列表策略；结果还须通过独立 XML 实现验证，包括 href 中编码的含 XML
-    // 1.0 控制字符文件名。
-    // Depth: 1 DAV reuses listing policy; the result must also validate in an independent XML
-    // implementation, including href-encoded filenames containing XML 1.0 control characters.
-    let dav = Client::new()
-        .request(reqwest::Method::from_bytes(b"PROPFIND")?, server.url())
-        .header("Depth", "1")
-        .send()?;
-    assert_eq!(dav.status(), 207);
-    assert_omission_header(&dav);
-    let dav_body = dav.text()?;
-    for event in EventReader::new(dav_body.as_bytes()) {
-        event?;
-    }
-    assert!(dav_body.contains("%25FF"));
-    assert!(dav_body.contains("control-%01.txt"));
-    assert!(!dav_body.contains("raw-alias"));
-
     // ZIP 有意成为唯一无损表示；原始字节使用大写 %HH，字面 `%` 转义为 %25。
     // ZIP is the sole lossless representation; raw bytes use upper-case %HH and literal `%` becomes %25.
     let zip_response = reqwest::blocking::get(format!("{}?zip", server.url()))?;
@@ -145,29 +126,24 @@ fn invalid_utf8_request_paths_are_rejected_before_every_route(
 ) -> Result<(), Error> {
     let client = Client::new();
     let invalid_url = format!("{}%FF", server.url());
-    for method in ["GET", "HEAD", "PUT", "PATCH", "DELETE", "MKCOL", "PROPFIND"] {
-        let mut request = client.request(
+    for method in ["GET", "HEAD", "PUT", "DELETE", "MKCOL"] {
+        let request = client.request(
             reqwest::Method::from_bytes(method.as_bytes())?,
             &invalid_url,
         );
-        if method == "PROPFIND" {
-            request = request.header("Depth", "0");
-        }
         let response = request.body("must not be published").send()?;
         assert_eq!(response.status(), 400, "method {method}");
     }
 
-    for method in ["COPY", "MOVE"] {
-        let destination = format!("http://localhost:{}/%FF", server.port());
-        let response = client
-            .request(
-                reqwest::Method::from_bytes(method.as_bytes())?,
-                format!("{}test.html", server.url()),
-            )
-            .header("Destination", destination)
-            .send()?;
-        assert_eq!(response.status(), 400, "method {method}");
-    }
+    let destination = format!("http://localhost:{}/%FF", server.port());
+    let response = client
+        .request(
+            reqwest::Method::from_bytes(b"MOVE")?,
+            format!("{}test.html", server.url()),
+        )
+        .header("Destination", destination)
+        .send()?;
+    assert_eq!(response.status(), 400, "method MOVE");
     assert_eq!(
         std::fs::read_to_string(server.path().join("test.html"))?,
         "This is test.html"

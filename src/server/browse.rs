@@ -1,6 +1,5 @@
-//! 目录浏览：目录列表、文件名搜索、index 页渲染
-//! （`--render-index`/`--render-try-index`/`--render-spa`）、404 错误页，
-//! 以及把文件系统条目转换成 [`PathItem`] 视图模型。
+//! 目录浏览、文件名搜索、404 响应，以及把文件系统条目转换成
+//! [`PathItem`] 视图模型。
 //!
 //! ## 本模块的 Rust 知识点
 //! - **`spawn_blocking`**：基于 dirfd 的目录树遍历是同步（阻塞）IO，
@@ -11,9 +10,8 @@
 //! - **`StreamExt::buffered`**：目录条目的元数据读取按固定窗口并发，
 //!   既降低大目录延迟，也避免无界任务把磁盘或 Tokio 阻塞池打满。
 //!
-//! Directory browsing: directory listings, filename search, index-page rendering
-//! (`--render-index`/`--render-try-index`/`--render-spa`), 404 pages, and conversion of filesystem
-//! entries into the [`PathItem`] view model.
+//! Directory browsing, filename search, 404 responses, and conversion of filesystem entries into
+//! the [`PathItem`] view model.
 //!
 //! ## Rust concepts in this module
 //! - **`spawn_blocking`**: dirfd-based directory-tree traversal is synchronous (blocking) I/O and
@@ -25,37 +23,34 @@
 //!   reducing large-directory latency without unbounded tasks saturating the disk or Tokio's
 //!   blocking pool.
 
-use super::content::{
-    OpenFileResponseOptions, apply_generated_preconditions, apply_read_precondition_outcome,
-};
+use super::content::{apply_generated_preconditions, apply_read_precondition_outcome};
 use super::error::{
     AdmissionError, AdmissionResource, ChangedStatus, FsError, QueueScope, ResponseError,
 };
-use super::filesystem::{NodeKind, validate_opened_trusted_asset};
 use super::model::{DataKind, IndexData, PathItem, PathType};
 use super::mutation_version::MUTATION_VERSION_HEADER;
-use super::preconditions::{ParsedPreconditions, ReadPreconditionOutcome};
-use super::reply::{set_content_disposition, status_not_found};
+use super::preconditions::ReadPreconditionOutcome;
+use super::reply::status_not_found;
 use super::security_headers::add_management_ui_csp;
 use super::walk::{
     CapabilityWalkAction, RequestCancellation, is_blocking_deadline,
     run_guarded_cancellable_blocking, walk_dir_entries,
 };
 use super::{
-    OpenErrorPolicy, RequestContext, Response, Server, classify_open_result, has_query_flag,
-    is_internal_temp_name, normalize_path, to_timestamp,
+    RequestContext, Response, Server, has_query_flag, is_internal_temp_name, normalize_path,
+    to_timestamp,
 };
 use crate::http::body_full;
-use crate::utils::get_file_name;
 
 use anyhow::{Result, anyhow};
 use headers::{CacheControl, ContentLength, ContentType, HeaderMapExt};
-use hyper::{StatusCode, header::HeaderValue};
+#[cfg(test)]
+use hyper::StatusCode;
+use hyper::header::HeaderValue;
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-const INDEX_NAME: &str = "index.html";
 #[derive(Clone)]
 struct ListingOptions {
     exist: bool,
@@ -185,9 +180,9 @@ impl Server {
             .flatten();
         if representation_complete {
             // 搜索会遍历整棵目录树并做大量 metadata IO，与
-            // hash/zip 共用有界的“昂贵任务”配额，避免多个
+            // 搜索和 ZIP 共用有界的“昂贵任务”配额，避免多个
             // 请求同时打满磁盘和 blocking pool。
-            // English: Search shares bounded expensive-task admission with hash/ZIP to prevent concurrent disk/blocking-pool exhaustion.
+            // English: Search shares bounded expensive-task admission with ZIP to prevent concurrent disk/blocking-pool exhaustion.
             let operation_timeout = Duration::from_secs(self.args.expensive_task_timeout);
             let deadline = tokio::time::Instant::now() + operation_timeout;
             let permit = match tokio::time::timeout_at(
@@ -368,107 +363,12 @@ impl Server {
         )
     }
 
-    /// `--render-index`/`--render-try-index` 模式：请求目录时改为发送
-    /// 目录下的 index.html（静态网站托管场景）。
-    /// Serve directory `index.html` under render-index/try-index site-hosting modes.
-    pub(super) async fn handle_render_index(
-        &self,
-        path: &Path,
-        ctx: &RequestContext<'_>,
-        res: &mut Response,
-    ) -> Result<()> {
-        let index_path = path.join(INDEX_NAME);
-        let requested_rel = Path::new(&ctx.authorization_path).join(INDEX_NAME);
-        let open_rel = self
-            .canonical_authorization_path(&normalize_path(&requested_rel)?)
-            .await?;
-        let opened = classify_open_result(
-            self.fs_root
-                .open(PathBuf::from(open_rel), NodeKind::Any)
-                .await,
-            "opening a rendered directory index",
-            OpenErrorPolicy::HideUnavailable,
-        )?
-        .filter(|opened| opened.metadata.is_file())
-        .filter(|opened| ctx.allows_actual(&opened.real_rel, &ctx.authorization_method));
-        if let Some(opened) = opened {
-            self.handle_send_trusted_opened_cap_file(opened, &index_path, ctx, res)
-                .await?;
-        } else if self.args.render_try_index {
-            self.handle_ls_dir(path, true, ctx, res).await?;
-        } else {
-            self.handle_not_found(ctx, res).await?;
-        }
-        Ok(())
-    }
-
-    /// 404 处理：配置了自定义错误页（assets 目录下的 404.html）就发它，
-    /// 否则回简单的 "Not Found" 文本。
-    /// Serve a configured assets/404.html or a simple Not Found response.
+    /// 返回固定、无敏感细节的 404 响应。
     pub(super) async fn handle_not_found(
         &self,
-        ctx: &RequestContext<'_>,
+        _ctx: &RequestContext<'_>,
         res: &mut Response,
     ) -> Result<()> {
-        if let Some(error_page) = &self.args.error_page {
-            // 中文：Range/条件头针对原缺失资源，不能继承给 404.html，否则会产生部分或空 404。
-            // English: Do not apply missing-resource Range/conditions to the error page.
-            let error_headers = headers::HeaderMap::new();
-            let opened = self
-                .args
-                .assets
-                .as_deref()
-                .and_then(|assets| error_page.strip_prefix(assets).ok())
-                .and_then(|rel| {
-                    self.assets_root
-                        .as_ref()
-                        .map(|root| (root.clone(), rel.to_path_buf()))
-                });
-            let Some((root, rel)) = opened else {
-                status_not_found(res);
-                return Ok(());
-            };
-            let Some(opened) = classify_open_result(
-                root.open(rel, NodeKind::Any).await,
-                "opening the configured internal error page",
-                OpenErrorPolicy::TrustedInternalAsset,
-            )?
-            else {
-                status_not_found(res);
-                return Ok(());
-            };
-            validate_opened_trusted_asset(&opened.metadata, error_page).map_err(|error| {
-                anyhow::Error::new(FsError::io(
-                    "validating the configured internal error page",
-                    error,
-                ))
-            })?;
-            let empty_preconditions = ParsedPreconditions::default();
-            self.handle_send_open_file(
-                opened.file,
-                opened.metadata,
-                error_page,
-                OpenFileResponseOptions {
-                    headers: &error_headers,
-                    preconditions: &empty_preconditions,
-                    head_only: ctx.head_only,
-                    allow_active_inline: true,
-                },
-                res,
-            )
-            .await?;
-            // 中文：自定义错误页内联显示但 sandbox，不能获得文件管理器同源权限。
-            // English: Display custom errors inline but sandbox them away from file-manager same-origin authority.
-            set_content_disposition(res, true, get_file_name(error_page))?;
-            res.headers_mut().insert(
-                "content-security-policy",
-                HeaderValue::from_static(
-                    "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:",
-                ),
-            );
-            *res.status_mut() = StatusCode::NOT_FOUND;
-            return Ok(());
-        }
         status_not_found(res);
         Ok(())
     }
@@ -627,8 +527,8 @@ impl Server {
             .unwrap_or(self.args.max_directory_entries as usize);
         let operation_timeout = Duration::from_secs(self.args.expensive_task_timeout);
         let deadline = tokio::time::Instant::now() + operation_timeout;
-        // 中文：平面列表仍执行阻塞 readdir/stat 且最多访问 max-walk-entries；与搜索/hash/archive 共用准入，防 H2 扇出无界 worker。
-        // English: Flat scans still consume bounded blocking work and share admission with search/hash/archive.
+        // 平面列表仍执行阻塞 readdir/stat 且最多访问 max-walk-entries；
+        // 它与搜索和归档共用昂贵任务准入。
         let permit = match tokio::time::timeout_at(
             deadline,
             self.expensive_task_limit.clone().acquire_owned(),

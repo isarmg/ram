@@ -41,15 +41,3 @@ fn path_prefix_reject_extra_component_text(
     assert_eq!(resp.status(), 400);
     Ok(())
 }
-
-#[rstest]
-fn path_prefix_propfind(
-    #[with(&["--path-prefix", "xyz"])] server: TestServer,
-) -> Result<(), Error> {
-    let resp = fetch!(b"PROPFIND", format!("{}{}", server.url(), "xyz"))
-        .header("depth", "1")
-        .send()?;
-    let text = resp.text()?;
-    assert!(text.contains("<D:href>/xyz/</D:href>"));
-    Ok(())
-}

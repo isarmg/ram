@@ -8,7 +8,7 @@
 //! - attacker-selected usernames and sources never create unbounded retained state;
 //! - queue, per-source, per-account, and global worker limits fail closed;
 //! - every permit and provisional reservation stays owned by the real blocking
-//!   hash or persistent-revocation worker until it exits, even if the HTTP future is dropped.
+//!   password worker until it exits, even if the HTTP future is dropped.
 
 use super::*;
 
@@ -30,10 +30,10 @@ impl AuthRateKey {
     }
 
     /// 中文：协议域前缀以非 UTF-8 字节开头，不可能与 `new` 哈希的任意 Rust 用户名字节串
-    /// 相同；Bearer 失败、撤销写入与密码登录因此不能互相制造退避。
+    /// 相同；不同协议域（如密码来源桶与主体桶）因此不能互相制造退避。
     /// English: A protocol-domain prefix beginning with invalid UTF-8 cannot equal any Rust username
-    /// byte string hashed by `new`, so bearer failures, revocation writes, and password login cannot
-    /// impose backoff on one another.
+    /// byte string hashed by `new`, so distinct protocol domains (such as the password source and
+    /// principal buckets) cannot impose backoff on one another.
     pub(super) fn namespaced(
         source: Option<SourceIdentity>,
         domain: &[u8],
@@ -73,12 +73,6 @@ pub(super) enum HashAttemptReservationReject {
     StateUnavailable,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum AuthRateStateError {
-    Capacity,
-    Unavailable,
-}
-
 #[derive(Debug, Default)]
 pub(super) struct AuthRateLimiter {
     pub(super) entries: HashMap<AuthRateKey, AuthFailureState>,
@@ -86,64 +80,6 @@ pub(super) struct AuthRateLimiter {
 }
 
 impl AuthRateLimiter {
-    pub(super) fn retry_after(&mut self, key: &AuthRateKey, now: Instant) -> Option<u64> {
-        self.cleanup(now);
-        let state = self.entries.get_mut(key)?;
-        state.last_seen = now;
-        if state.blocked_until > now {
-            let remaining = state.blocked_until.duration_since(now);
-            Some(
-                remaining
-                    .as_secs()
-                    .saturating_add(u64::from(remaining.subsec_nanos() != 0))
-                    .max(1),
-            )
-        } else {
-            None
-        }
-    }
-
-    pub(super) fn failed(
-        &mut self,
-        key: AuthRateKey,
-        now: Instant,
-    ) -> Result<Option<u64>, AuthRateStateError> {
-        self.cleanup(now);
-        if !self.ensure_entry_capacity(&key) {
-            return Err(AuthRateStateError::Capacity);
-        }
-        let state = self.entries.entry(key).or_insert(AuthFailureState {
-            failures: 0,
-            pending_hash_attempts: 0,
-            blocked_until: now,
-            last_seen: now,
-        });
-        state.failures = state.failures.saturating_add(1);
-        state.last_seen = now;
-        if state.failures <= AUTH_RATE_FREE_FAILURES {
-            return Ok(None);
-        }
-        let shift = (state.failures - AUTH_RATE_FREE_FAILURES - 1).min(6);
-        let delay = (1u64 << shift).min(AUTH_RATE_MAX_BACKOFF_SECS);
-        state.blocked_until = now + Duration::from_secs(delay);
-        Ok(Some(delay))
-    }
-
-    pub(super) fn succeeded(&mut self, key: &AuthRateKey) {
-        let Some(state) = self.entries.get_mut(key) else {
-            return;
-        };
-        // 中文：成功 proof 清除已提交失败，但不能抹掉并发暂定预留；后者会自行提交或取消。
-        // English: Success clears committed failures, not concurrent provisional reservations that must resolve themselves.
-        if state.pending_hash_attempts == 0 {
-            self.entries.remove(key);
-        } else {
-            state.failures = 0;
-            state.blocked_until = Instant::now();
-            state.last_seen = Instant::now();
-        }
-    }
-
     pub(super) fn reserve_hash_attempt(
         &mut self,
         key: AuthRateKey,
@@ -182,11 +118,6 @@ impl AuthRateLimiter {
         }
         state.pending_hash_attempts = state.pending_hash_attempts.saturating_add(1);
         Ok(())
-    }
-
-    pub(super) fn hash_attempt_blocked(&mut self, key: &AuthRateKey, now: Instant) -> Option<u64> {
-        self.cleanup(now);
-        self.retry_after_without_cleanup(key, now)
     }
 
     pub(super) fn finish_hash_attempt(
@@ -265,11 +196,11 @@ impl AuthRateLimiter {
             return true;
         }
         // 中文：容量保护必须 fail closed。这里的“无活动 hash”条目仍保存尚未到期的失败次数或
-        // 退避 deadline；为攻击者选择的新键驱逐它，会让轮换用户名/伪 token 冲刷受害账号的
+        // 退避 deadline；为攻击者选择的新键驱逐它，会让轮换用户名冲刷受害账号的
         // 密码退避。只有上方 cleanup 按固定 idle expiry 到期删除，满容量时新键一律拒绝。
         // English: Capacity protection must fail closed. An entry without a live hash still carries
         // unexpired failures or a backoff deadline; evicting it for an attacker-selected key lets
-        // username/token churn erase a victim's password throttle. Only fixed idle-expiry cleanup may
+        // username churn erase a victim's password throttle. Only fixed idle-expiry cleanup may
         // remove retained state, and a new key is rejected while the remaining state is at capacity.
         false
     }
@@ -288,59 +219,6 @@ impl AuthRateLimiter {
                     .checked_duration_since(value.last_seen)
                     .is_none_or(|idle| idle < AUTH_RATE_IDLE_EXPIRY)
         });
-    }
-}
-
-/// 暂定昂贵认证尝试；Drop 是取消路径，只移除预留，绝不伪造凭据失败。
-/// A provisional expensive attempt whose Drop path removes only its reservation on queue/timeout/shutdown cancellation.
-pub(super) struct HashAttemptReservation {
-    pub(super) limiter: Arc<Mutex<AuthRateLimiter>>,
-    pub(super) key: AuthRateKey,
-    pub(super) active: bool,
-}
-
-impl HashAttemptReservation {
-    pub(super) fn reserve(
-        limiter: Arc<Mutex<AuthRateLimiter>>,
-        key: AuthRateKey,
-    ) -> Result<Self, HashAttemptReservationReject> {
-        limiter
-            .lock()
-            .map_err(|_| HashAttemptReservationReject::StateUnavailable)?
-            .reserve_hash_attempt(key.clone(), Instant::now())?;
-        Ok(Self {
-            limiter,
-            key,
-            active: true,
-        })
-    }
-
-    pub(super) fn blocked_after_global_permit(
-        &self,
-    ) -> Result<Option<u64>, HashAttemptReservationReject> {
-        self.limiter
-            .lock()
-            .map_err(|_| HashAttemptReservationReject::StateUnavailable)
-            .map(|mut limiter| limiter.hash_attempt_blocked(&self.key, Instant::now()))
-    }
-
-    pub(super) fn finish(mut self, succeeded: bool) -> bool {
-        self.active = false;
-        match self.limiter.lock() {
-            Ok(mut limiter) => limiter.finish_hash_attempt(&self.key, succeeded, Instant::now()),
-            Err(_) => false,
-        }
-    }
-}
-
-impl Drop for HashAttemptReservation {
-    fn drop(&mut self) {
-        if !self.active {
-            return;
-        }
-        if let Ok(mut limiter) = self.limiter.lock() {
-            let _ = limiter.cancel_hash_attempt(&self.key, Instant::now());
-        }
     }
 }
 
@@ -572,11 +450,10 @@ pub(super) struct PasswordHashAdmissionState {
 }
 
 /// 两层有界准入：mutex 状态先限制总排队量及每来源/主体份额，semaphore 再限制真正执行的
-/// 昂贵认证阻塞任务（密码哈希或持久 token 撤销 I/O）。先取得 map 预留可防止无限任务堆积
-/// 在 semaphore 前。
+/// 昂贵认证阻塞任务（密码哈希）。先取得 map 预留可防止无限任务堆积在 semaphore 前。
 /// Two bounded layers: mutex state caps queued work and per-source/subject shares, then the semaphore
-/// caps active expensive-auth blocking jobs (password hashing or persistent token-revocation I/O).
-/// Reserving map capacity first prevents an unbounded pile-up in front of the semaphore.
+/// caps active expensive-auth blocking jobs (password hashing). Reserving map capacity first prevents
+/// an unbounded pile-up in front of the semaphore.
 #[derive(Debug)]
 pub(super) struct PasswordHashAdmission {
     pub(super) verify_limit: Arc<Semaphore>,
@@ -615,11 +492,11 @@ impl PasswordHashAdmission {
         domain: &[u8],
         username: &str,
     ) -> Result<PasswordHashAdmissionGuard, PasswordHashAdmissionOutcome> {
-        // 中文：全局与来源计数跨协议共享，但主体计数带不可碰撞的协议域；撤销 token 洪泛
-        // 不能耗尽同用户名的密码哈希或撤销写槽。
-        // English: Global and source counts are shared across protocols, while subject counts use an
-        // unambiguous protocol domain so revoked-token floods cannot consume password or mutation
-        // slots for the same username.
+        // 中文：全局与来源计数共享，但主体计数使用不可碰撞的域；认证失败桶和昂贵密码
+        // 校验槽因此不会因相同用户名而互相覆盖。
+        // English: Global and source counts are shared, while subject counts use an unambiguous
+        // domain so authentication-failure buckets and expensive password-verification slots cannot
+        // overwrite each other for the same username.
         let mut digest = Sha256::new();
         digest.update(domain);
         digest.update(username.as_bytes());
@@ -782,26 +659,17 @@ impl Drop for PasswordHashAdmissionGuard {
     }
 }
 
-/// worker 可接管单层 token 撤销预留，或密码专用的来源+用户名双层预留。
-/// A worker can take either one token-revocation reservation or the password-specific
-/// source+claimed-name pair.
+/// worker 接管密码专用的来源+用户名双层预留。
+/// A worker takes the password-specific source+claimed-name reservation pair.
 pub(super) enum WorkerRateReservation {
-    Single(HashAttemptReservation),
     Password(PasswordRateReservation),
 }
 
 impl WorkerRateReservation {
     pub(super) fn finish(self, accepted: bool) -> bool {
         match self {
-            Self::Single(reservation) => reservation.finish(accepted),
             Self::Password(reservation) => reservation.finish(accepted),
         }
-    }
-}
-
-impl From<HashAttemptReservation> for WorkerRateReservation {
-    fn from(reservation: HashAttemptReservation) -> Self {
-        Self::Single(reservation)
     }
 }
 

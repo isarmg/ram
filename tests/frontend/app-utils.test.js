@@ -7,8 +7,6 @@ import {
   formatMtime,
   formatPercent,
   getEncoding,
-  hasUtf8Bom,
-  isUtf8Encoding,
 } from "../../web/app-utils.js";
 
 describe("browser utility boundaries", () => {
@@ -40,7 +38,5 @@ describe("browser utility boundaries", () => {
 
   test("parses charset parameters in any position", () => {
     expect(getEncoding("text/plain; boundary=x; charset=\"UTF-8\"")).toBe("utf-8");
-    expect(isUtf8Encoding("utf8")).toBe(true);
-    expect(hasUtf8Bom(new Uint8Array([0xef, 0xbb, 0xbf, 0x61]))).toBe(true);
   });
 });

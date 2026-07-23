@@ -5,19 +5,18 @@ edition = "2024"
 resolver = "3"
 rust-version = "1.97.1"
 authors = ["Ram contributors", "sigoden <sigoden@gmail.com>"]
-description = "A security-focused, Linux-only HTTP and WebDAV file server"
+description = "A security-focused, Linux-only browser file server"
 license = "MIT"
 readme = "README.md"
 homepage = "https://github.com/isarmg/ram"
 repository = "https://github.com/isarmg/ram"
 publish = false
 categories = ["command-line-utilities", "web-programming::http-server"]
-keywords = ["static", "file", "server", "webdav", "cli"]
+keywords = ["static", "file", "server", "browser", "cli"]
 include = [
     "/src/**",
     "/web/**",
     "/about.toml",
-    "/about.hbs",
     "/config.example.yaml",
     "/docs/CHANGELOG.md",
     "/docs/CODE_FLOW.md",
@@ -60,7 +59,6 @@ zip = { version = "8.6", default-features = false, features = ["deflate"] }
 headers = "0.4"
 mime_guess = "2.0"
 if-addrs = "0.15"
-tokio-rustls = { version = "0.26", optional = true }
 uuid = { version = "1.7", features = ["v4", "fast-rng"] }
 log = { version = "0.4", features = ["std"] }
 socket2 = "0.6"
@@ -76,8 +74,7 @@ sha-crypt = "0.6"
 argon2 = "=0.5.3"
 base64 = "0.22"
 smart-default = "0.7"
-rustls-pki-types = "1.2"
-hyper-util = { version = "0.1", features = ["server-auto", "server-graceful", "tokio"] }
+hyper-util = { version = "0.1", default-features = false, features = ["http1", "server-graceful", "tokio"] }
 http-body-util = "0.1"
 bytes = "1.5"
 pin-project-lite = "0.2"
@@ -86,12 +83,9 @@ hmac = "0.13.0"
 hex = "0.4.3"
 rustix = { version = "1.1", features = ["fs", "process"] }
 getrandom = "0.4"
-quick-xml = "0.41"
-url = "2"
 
 [features]
-default = ["tls"]
-tls = ["tokio-rustls"]
+default = []
 fuzzing = []
 
 [dev-dependencies]
@@ -105,15 +99,12 @@ tokio = { version = "1", features = ["test-util"] }
 # Independent test-client reference only. Its unconditional MD5 dependency is forbidden from the
 # normal/build graph by scripts/check-production-deps.sh.
 digest_auth = "0.3.1"
-h2 = "0.4"
 predicates = "3"
 regex = "1"
-reqwest = { version = "0.13", features = ["blocking", "http2", "multipart", "rustls"], default-features = false }
+reqwest = { version = "0.13", features = ["blocking", "multipart"], default-features = false }
 rstest = "0.26.1"
 urlencoding = "2.1"
-# 黑盒集成测试用于验证 XML 转义和 URI 编码的独立参考实现。
-# Independent reference implementations used to validate XML escaping and URI encoding in black-box tests.
-xml-rs = "1.0.0"
+url = "2"
 
 [profile.release]
 opt-level = 3
