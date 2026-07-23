@@ -302,7 +302,7 @@ fn unix_peer_helper_command(
     uid: u32,
     gid: u32,
 ) -> Result<Command, Error> {
-    let mut command = Command::new(env::current_exe()?);
+    let mut command = Command::new("/proc/self/exe");
     command
         .args([
             "--exact",
