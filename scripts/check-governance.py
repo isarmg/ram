@@ -58,9 +58,9 @@ def require_needles(relative: str, contents: str, needles: tuple[str, ...]) -> N
 def require_bilingual_documents() -> None:
     pairs = {
         "README.md": ("# Ram 文件服务", "# Ram File Server (English)"),
-        "CHANGELOG.md": ("# 变更记录", "# Changelog (English)"),
-        "CONTRIBUTING.md": ("# 贡献指南", "# Contributing Guide"),
-        "SECURITY.md": ("# 安全策略", "# Security Policy"),
+        "docs/CHANGELOG.md": ("# 变更记录", "# Changelog (English)"),
+        "docs/CONTRIBUTING.md": ("# 贡献指南", "# Contributing Guide"),
+        "docs/SECURITY.md": ("# 安全策略", "# Security Policy"),
         "docs/THREAT_MODEL.md": ("# 部署威胁模型", "# Deployment Threat Model"),
         "docs/REPOSITORY_GOVERNANCE.md": (
             "# 仓库治理与发布保护检查表",
@@ -114,6 +114,9 @@ def check() -> None:
         "/LICENSE",
         "/about.toml",
         "/about.hbs",
+        "/docs/CHANGELOG.md",
+        "/docs/CONTRIBUTING.md",
+        "/docs/SECURITY.md",
         "/scripts/check-license-policy.py",
         "/scripts/check-license-report.py",
         "/scripts/check-fuzz-layout.py",
@@ -131,9 +134,9 @@ def check() -> None:
                 f"CODEOWNERS rule {pattern!r} needs at least two distinct owners, got {owners}"
             )
 
-    security = read("SECURITY.md")
+    security = read("docs/SECURITY.md")
     require_needles(
-        "SECURITY.md",
+        "docs/SECURITY.md",
         security,
         (
             "## 支持版本",
@@ -144,9 +147,9 @@ def check() -> None:
         ),
     )
 
-    contributing = read("CONTRIBUTING.md")
+    contributing = read("docs/CONTRIBUTING.md")
     require_needles(
-        "CONTRIBUTING.md",
+        "docs/CONTRIBUTING.md",
         contributing,
         (
             "cargo test --all-targets --all-features --locked",
@@ -190,15 +193,23 @@ def check() -> None:
         cargo_package = tomllib.load(cargo_file)["package"]
         version = cargo_package["version"]
         package_include = cargo_package["include"]
-    if "/docs/CODE_FLOW.md" not in package_include:
-        raise ValueError("Cargo.toml package.include must contain /docs/CODE_FLOW.md")
-    if "/docs/PROJECT_STRUCTURE.md" not in package_include:
-        raise ValueError("Cargo.toml package.include must contain /docs/PROJECT_STRUCTURE.md")
+    required_package_documents = (
+        "/docs/CHANGELOG.md",
+        "/docs/CODE_FLOW.md",
+        "/docs/CONTRIBUTING.md",
+        "/docs/PROJECT_STRUCTURE.md",
+        "/docs/REPOSITORY_GOVERNANCE.md",
+        "/docs/SECURITY.md",
+        "/docs/THREAT_MODEL.md",
+    )
+    for relative in required_package_documents:
+        if relative not in package_include:
+            raise ValueError(f"Cargo.toml package.include must contain {relative}")
     if cargo_package.get("publish") != ["crates-io"]:
         raise ValueError("Cargo.toml package.publish must be exactly ['crates-io']")
-    changelog = read("CHANGELOG.md")
+    changelog = read("docs/CHANGELOG.md")
     require_needles(
-        "CHANGELOG.md",
+        "docs/CHANGELOG.md",
         changelog,
         ("## [Unreleased]", f"## [{version}]"),
     )
@@ -247,6 +258,8 @@ def check() -> None:
             "predicate-path:",
             "cargo publish --locked --no-verify --registry crates-io",
             "ram-release-workflow:${{ github.repository }}",
+            "cp LICENSE README.md config.example.yaml",
+            'cp -R docs "$stage/"',
         ),
     )
 
@@ -278,7 +291,10 @@ def check() -> None:
         archive_checker,
         (
             '"docs/CODE_FLOW.md"',
+            '"docs/CHANGELOG.md"',
+            '"docs/CONTRIBUTING.md"',
             '"docs/PROJECT_STRUCTURE.md"',
+            '"docs/SECURITY.md"',
             "MAX_EXPANDED_ARCHIVE_BYTES",
             "BoundedExpandedReader",
             'mode="r|"',
@@ -321,6 +337,7 @@ def check() -> None:
             'payload.get("sha") != expected_tag_sha',
             "annotated tag must point directly at the commit being built",
             "verify_version_documents",
+            'CHANGELOG_PATH = "docs/CHANGELOG.md"',
         ),
     )
 

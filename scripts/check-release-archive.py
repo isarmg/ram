@@ -29,13 +29,13 @@ BASE_FILES = frozenset(
         "ram",
         "LICENSE",
         "README.md",
-        "SECURITY.md",
-        "CONTRIBUTING.md",
-        "CHANGELOG.md",
         "config.example.yaml",
+        "docs/CHANGELOG.md",
         "docs/CODE_FLOW.md",
+        "docs/CONTRIBUTING.md",
         "docs/PROJECT_STRUCTURE.md",
         "docs/REPOSITORY_GOVERNANCE.md",
+        "docs/SECURITY.md",
         "docs/THREAT_MODEL.md",
         "ram-fileserver.spdx.json",
         "THIRD-PARTY-LICENSES.html",
@@ -232,10 +232,20 @@ def expect_rejected(
 
 def self_test() -> None:
     stage = "ram-v1.2.3-x86_64-unknown-linux-gnu"
-    if "docs/CODE_FLOW.md" not in BASE_FILES:
-        raise AssertionError("code-flow documentation is absent from the release policy")
-    if "docs/PROJECT_STRUCTURE.md" not in BASE_FILES:
-        raise AssertionError("project-structure documentation is absent from the release policy")
+    required_documents = {
+        "docs/CHANGELOG.md",
+        "docs/CODE_FLOW.md",
+        "docs/CONTRIBUTING.md",
+        "docs/PROJECT_STRUCTURE.md",
+        "docs/REPOSITORY_GOVERNANCE.md",
+        "docs/SECURITY.md",
+        "docs/THREAT_MODEL.md",
+    }
+    missing_documents = required_documents - BASE_FILES
+    if missing_documents:
+        raise AssertionError(
+            f"documentation is absent from the release policy: {sorted(missing_documents)!r}"
+        )
     if "LICENSE" not in BASE_FILES or {"LICENSE-APACHE", "LICENSE-MIT"} & BASE_FILES:
         raise AssertionError("release policy does not enforce the single MIT LICENSE file")
     with tempfile.TemporaryDirectory(prefix="ram-release-archive-") as directory:

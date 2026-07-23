@@ -16,6 +16,7 @@ from typing import Any
 
 MAX_GITHUB_RESPONSE_BYTES = 2 * 1024 * 1024
 README_ENGLISH_HEADING = "# Ram File Server (English)"
+CHANGELOG_PATH = "docs/CHANGELOG.md"
 CHANGELOG_ENGLISH_HEADING = "# Changelog (English)"
 
 # 这三条命令是用户从发布下载到安装的最小完整链路。按命令类型分别校验，
@@ -103,7 +104,7 @@ def verify_changelog_markers(changelog: str, version: str) -> None:
     """
 
     for language, section in split_bilingual_document(
-        changelog, CHANGELOG_ENGLISH_HEADING, "CHANGELOG.md"
+        changelog, CHANGELOG_ENGLISH_HEADING, CHANGELOG_PATH
     ):
         markers = (
             ("Unreleased heading", r"## \[Unreleased\]"),
@@ -113,7 +114,7 @@ def verify_changelog_markers(changelog: str, version: str) -> None:
             count = len(re.findall(rf"^{pattern}$", section, flags=re.MULTILINE))
             if count != 1:
                 raise TagVerificationError(
-                    f"CHANGELOG.md {language} section must contain exactly one "
+                    f"{CHANGELOG_PATH} {language} section must contain exactly one "
                     f"{description}, got {count}"
                 )
 
@@ -124,7 +125,7 @@ def verify_changelog_markers(changelog: str, version: str) -> None:
     for pattern in shared_links:
         if len(re.findall(rf"^{pattern}$", changelog, flags=re.MULTILINE)) != 1:
             raise TagVerificationError(
-                "CHANGELOG.md must contain exactly one shared anchored current release link: "
+                f"{CHANGELOG_PATH} must contain exactly one shared anchored current release link: "
                 f"{pattern}"
             )
 
@@ -250,7 +251,7 @@ def verify_version_tree(root: pathlib.Path) -> str:
         package = json.loads((root / "package.json").read_text(encoding="utf-8"))
         package_lock = json.loads((root / "package-lock.json").read_text(encoding="utf-8"))
         readme = (root / "README.md").read_text(encoding="utf-8")
-        changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+        changelog = (root / CHANGELOG_PATH).read_text(encoding="utf-8")
     except (OSError, UnicodeError, json.JSONDecodeError, KeyError, tomllib.TOMLDecodeError) as error:
         raise TagVerificationError(f"cannot read project version documents under {root}: {error}") from error
     if (

@@ -1771,7 +1771,7 @@ cargo package --locked
 ## 18. 安全策略与贡献
 
 完整的支持版本、私密报告渠道、响应目标与协调披露流程见
-[SECURITY.md](SECURITY.md)。支持最新稳定 minor 版本；前一个稳定 minor 仅接收关键安全
+[SECURITY.md](docs/SECURITY.md)。支持最新稳定 minor 版本；前一个稳定 minor 仅接收关键安全
 修复，旧版本和预发布版本不受支持。管理员应订阅 GitHub Security Advisories 并及时升级。
 
 请不要在公开 issue 中披露漏洞。使用
@@ -1786,7 +1786,8 @@ cargo package --locked
 普通贡献应保持改动聚焦，说明兼容性和部署影响，并通过第 16 节全部检查。涉及认证、
 路径、写操作、主动内容、TLS、资源上限或 WebDAV 的变更需要额外安全审查。
 具体的双特性矩阵、`openat2` 不变量、测试要求和独立审阅规则见
-[CONTRIBUTING.md](CONTRIBUTING.md)；用户可见变化记录在 [CHANGELOG.md](CHANGELOG.md)。
+[CONTRIBUTING.md](docs/CONTRIBUTING.md)；用户可见变化记录在
+[CHANGELOG.md](docs/CHANGELOG.md)。
 按启动、HTTP 管线、认证、读写/WebDAV、配额钩子、前端、日志终态与发布划分的多张
 Mermaid 代码流程图见 [代码工作流程与模块作用](docs/CODE_FLOW.md)。
 
@@ -2725,16 +2726,17 @@ links, and supply-chain metadata. There are no official musl, Windows, or macOS 
 
 ## 18. Security and contributing
 
-See [SECURITY.md](SECURITY.md) for supported versions, private reporting, response goals, and
+See [SECURITY.md](docs/SECURITY.md) for supported versions, private reporting, response goals, and
 coordinated disclosure. Do not disclose vulnerabilities in public issues. Use
 [GitHub private reporting](https://github.com/isarmg/ram/security/advisories/new), coordinating
 separately with upstream dufs if applicable. Never send real credentials, keys, Bearer tokens, or
 production data.
 
-Contributions remain focused, document compatibility/deployment impact, update CHANGELOG for public
+Contributions remain focused, document compatibility/deployment impact, update
+[CHANGELOG](docs/CHANGELOG.md) for public
 behavior, and pass section 16. Authentication, paths, writes, active content, TLS, budgets, WebDAV,
 dependencies, and releases need independent security review. Detailed invariants and test/ownership
-rules are in [CONTRIBUTING.md](CONTRIBUTING.md).
+rules are in [CONTRIBUTING.md](docs/CONTRIBUTING.md).
 For source-level navigation, see the bilingual [code-flow and module-responsibility
 diagrams](docs/CODE_FLOW.md), covering startup, HTTP, authentication, reads/writes,
 WebDAV, quota hooks, the browser UI, terminal logging, and release verification.

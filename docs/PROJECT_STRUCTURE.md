@@ -14,14 +14,14 @@
 ├── fuzz/                 独立锁定的 cargo-fuzz workspace 和 corpus
 ├── benchmarks/           可复现性能基线、schema 与比较工具
 ├── scripts/              CI、供应链、发布与覆盖率检查器
-├── docs/                 架构、流程、威胁模型和治理文档
+├── docs/                 变更、安全、贡献、架构、流程、威胁模型和治理文档
 ├── release-metadata/     发布时生成的供应链清单边界
 └── .github/              GitHub 所有权、依赖更新与工作流配置
 ```
 
-根目录只保留生态工具必须发现的清单和面向项目的入口文档，例如 `Cargo.toml`、
-`package.json`、`README.md`、`CHANGELOG.md`、`SECURITY.md`、`CONTRIBUTING.md` 和唯一的
-`LICENSE`。构建输出、下载后的发布制品和带机器路径的供应链清单不得提交。
+根目录只保留生态工具必须发现的清单、项目入口 `README.md` 和唯一的 `LICENSE`；
+`CHANGELOG.md`、`SECURITY.md`、`CONTRIBUTING.md` 与其它长期文档统一放在 `docs/`。
+构建输出、下载后的发布制品和带机器路径的供应链清单不得提交。
 
 ## 2. Rust 模块
 
@@ -111,15 +111,15 @@ security boundaries, and [Deployment Threat Model](THREAT_MODEL.md) for deployme
 ├── fuzz/                 Separately locked cargo-fuzz workspace and corpora
 ├── benchmarks/           Reproducible baselines, schemas, and comparison tools
 ├── scripts/              CI, supply-chain, release, and coverage checkers
-├── docs/                 Architecture, flow, threat-model, and governance documents
+├── docs/                 Change, security, contribution, architecture, flow, threat-model, and governance documents
 ├── release-metadata/     Release-time supply-chain inventory boundary
 └── .github/              Ownership, dependency-update, and workflow configuration
 ```
 
-The repository root retains only ecosystem-discovered manifests and project entry documents, such as
-`Cargo.toml`, `package.json`, `README.md`, `CHANGELOG.md`, `SECURITY.md`, `CONTRIBUTING.md`, and the
-single `LICENSE`. Build output, downloaded release artifacts, and inventories containing machine paths
-are never committed.
+The repository root retains only ecosystem-discovered manifests, the project-entry `README.md`, and
+the single `LICENSE`. `CHANGELOG.md`, `SECURITY.md`, `CONTRIBUTING.md`, and other long-lived
+documentation live under `docs/`. Build output, downloaded release artifacts, and inventories
+containing machine paths are never committed.
 
 ## 2. Rust modules
 

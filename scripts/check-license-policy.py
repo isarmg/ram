@@ -180,7 +180,7 @@ def require_project_mit_only() -> None:
         raise PolicyError(f"cannot read {workflow}: {error}") from error
     if "LICENSE-" in release:
         raise PolicyError("release workflow still references a legacy split license file")
-    if "cp LICENSE README.md SECURITY.md CONTRIBUTING.md" not in release:
+    if "cp LICENSE README.md config.example.yaml" not in release:
         raise PolicyError("release workflow must package the single LICENSE file")
 
 

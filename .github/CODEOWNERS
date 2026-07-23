@@ -38,11 +38,13 @@
 /deny.toml @isarmg @sigoden
 /package.json @isarmg @sigoden
 /package-lock.json @isarmg @sigoden
-/SECURITY.md @isarmg @sigoden
+/docs/CHANGELOG.md @isarmg @sigoden
 /docs/CODE_FLOW.md @isarmg @sigoden
+/docs/CONTRIBUTING.md @isarmg @sigoden
 /docs/PROJECT_STRUCTURE.md @isarmg @sigoden
-/docs/THREAT_MODEL.md @isarmg @sigoden
 /docs/REPOSITORY_GOVERNANCE.md @isarmg @sigoden
+/docs/SECURITY.md @isarmg @sigoden
+/docs/THREAT_MODEL.md @isarmg @sigoden
 /release-metadata/README.md @isarmg @sigoden
 
 # 默认兜底属主。 / Default fallback owner.

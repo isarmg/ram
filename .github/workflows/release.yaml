@@ -343,8 +343,7 @@ jobs:
           stage="dist/$name"
           mkdir -p "$stage"
           install -m 0755 "target/${TARGET}/release/ram" "$stage/ram"
-          cp LICENSE README.md SECURITY.md CONTRIBUTING.md \
-            CHANGELOG.md config.example.yaml "$stage/"
+          cp LICENSE README.md config.example.yaml "$stage/"
           cp -R docs "$stage/"
           cp "release-metadata/ram-fileserver-${TARGET}.cdx.json" \
             release-metadata/ram-fileserver.spdx.json \
